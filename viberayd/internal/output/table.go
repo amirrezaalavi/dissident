@@ -1,0 +1,26 @@
+package output
+
+import (
+	"fmt"
+	"io"
+	"time"
+
+	"github.com/amirrezaalavi/Viberayd/internal/models"
+)
+
+// TableFormatter outputs working configs as their original share link plus latency.
+type TableFormatter struct{}
+
+func (f *TableFormatter) Format(w io.Writer, results []models.TestResult, summary models.Summary) error {
+	for _, r := range results {
+		if r.Status != models.StatusSuccess {
+			continue
+		}
+
+		latency := r.Latencies.EffectiveLatency()
+
+		fmt.Fprintf(w, "%s %s\n", r.Config.Raw, latency.Round(time.Millisecond))
+	}
+
+	return nil
+}
