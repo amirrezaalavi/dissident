@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>viber-console</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="status-dot" id="status-dot" title="Proxy status"></span>
+      <span class="status-label" id="status-label">Proxy is working</span>
+      <div class="topbar-spacer"></div>
+      <button class="icon-btn" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
+      <button class="icon-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">🌙</button>
+    </div>
+    <div class="topbar-sub">
+      <span id="summary-text">–</span>
+    </div>
+  </header>
+
+  <!-- Main content -->
+  <main class="container">
+    <!-- WANs section -->
+    <section class="section" id="wans-section">
+      <h2 class="section-title">WANs</h2>
+      <div class="wan-list" id="wan-list"></div>
+    </section>
+
+    <!-- Services section -->
+    <section class="section" id="services-section">
+      <h2 class="section-title">Services</h2>
+      <div class="service-list" id="service-list"></div>
+    </section>
+
+    <!-- Subscription section -->
+    <section class="section" id="subscription-section">
+      <h2 class="section-title">Subscription</h2>
+      <div class="card subscription-card" id="subscription-card">
+        <span id="subscription-text">–</span>
+      </div>
+    </section>
+
+    <!-- Advanced section (collapsible) -->
+    <section class="section" id="advanced-section">
+      <button class="advanced-toggle" id="advanced-toggle" aria-expanded="false">
+        <span class="advanced-label">Advanced</span>
+        <span class="advanced-chevron" id="advanced-chevron">▸</span>
+      </button>
+      <div class="advanced-content" id="advanced-content" hidden>
+        <div class="advanced-grid">
+          <div class="card advanced-card">
+            <h3 class="card-subtitle">Configs</h3>
+            <div class="toolbar">
+              <select id="state-filter" class="input">
+                <option value="">All states</option>
+                <option value="working">working</option>
+                <option value="failed">failed</option>
+                <option value="unreachable">unreachable</option>
+              </select>
+              <input id="search" class="input" type="search" placeholder="Search host…">
+            </div>
+            <div class="config-list" id="config-list"></div>
+          </div>
+          <div class="card advanced-card">
+            <h3 class="card-subtitle">Settings</h3>
+            <div class="tabs">
+              <button class="tab active" data-group="viberayd">Viberayd</button>
+              <button class="tab" data-group="viberoxy">Viberoxy</button>
+            </div>
+            <div class="urls-card" id="urls-card" hidden>
+              <h4 class="card-title">Subscription URLs (viberayd)</h4>
+              <p class="desc">One URL per line. Invalid lines are rejected on Apply.</p>
+              <textarea id="urls-textarea" class="input urls-textarea" rows="6" spellcheck="false"
+                placeholder="https://example.com/sub&#10;https://another.example/sub"></textarea>
+              <div class="urls-actions">
+                <span class="form-msg" id="urls-msg"></span>
+                <button type="button" id="urls-apply" class="btn primary">Apply URLs</button>
+              </div>
+            </div>
+            <form id="settings-form" autocomplete="off">
+              <div id="settings-fields"></div>
+              <div class="form-actions">
+                <span class="form-msg" id="form-msg"></span>
+                <label class="checkbox-label">
+                  <input type="checkbox" id="restart-check" checked> restart after save
+                </label>
+                <button type="submit" class="btn primary">Save &amp; Restart</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span id="last-updated">—</span> · <span id="console-version">viber-console</span>
+  </footer>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
