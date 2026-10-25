@@ -1,0 +1,162 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · dissident</title>
+{{if .Refresh}}<meta http-equiv="refresh" content="5">{{end}}
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --fg: #17191f;
+    --muted: #5f6673;
+    --border: #d9dde4;
+    --accent: #1f5eff;
+    --accent-fg: #ffffff;
+    --danger: #b42318;
+    --warn-bg: #fff4e5;
+    --err-bg: #fdecea;
+    --code-bg: #f0f2f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121419;
+      --panel: #1b1e25;
+      --fg: #e8eaf0;
+      --muted: #a4abba;
+      --border: #303643;
+      --accent: #7aa2ff;
+      --accent-fg: #0b1020;
+      --danger: #ff8a80;
+      --warn-bg: #3a2b12;
+      --err-bg: #3d1d1b;
+      --code-bg: #232732;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+  }
+  .wrap { width: 100%; max-width: 76rem; margin: 0 auto; padding: 0 1.1rem; }
+  header.top { background: var(--panel); border-bottom: 1px solid var(--border); }
+  .top-inner {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .7rem 1.4rem;
+    min-height: 3.5rem; padding-top: .55rem; padding-bottom: .55rem;
+  }
+  .brand { font-size: 1.22rem; font-weight: 700; color: var(--fg); text-decoration: none; letter-spacing: .01em; }
+  .ver { color: var(--muted); font-size: .86rem; margin-left: .35rem; }
+  nav.main-nav { display: flex; flex-wrap: wrap; gap: .25rem .15rem; }
+  nav.main-nav a {
+    color: var(--muted); text-decoration: none; padding: .32rem .6rem; border-radius: .4rem;
+    font-size: .94rem;
+  }
+  nav.main-nav a:hover { background: var(--code-bg); color: var(--fg); }
+  nav.main-nav a.active { background: var(--accent); color: var(--accent-fg); }
+  main.wrap { padding-top: 1.2rem; padding-bottom: 1.5rem; }
+  h1 { font-size: 1.55rem; margin: .2rem 0 .9rem; }
+  h2 { font-size: 1.08rem; margin: 0 0 .65rem; }
+  p { margin: .45rem 0; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .warn { color: var(--danger); font-weight: 600; }
+  .notice {
+    background: var(--warn-bg); border: 1px solid var(--border); border-radius: .5rem;
+    padding: .65rem .85rem; margin: .6rem 0 1rem;
+  }
+  .flash {
+    background: var(--code-bg); border: 1px solid var(--border); border-left: .25rem solid var(--accent);
+    border-radius: .45rem; padding: .6rem .85rem; margin: .6rem 0 1rem; overflow-wrap: anywhere;
+  }
+  .flash-error { border-left-color: var(--danger); background: var(--err-bg); }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: .6rem;
+    padding: .9rem 1.05rem; margin: .9rem 0;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: .9rem; margin: .9rem 0; }
+  .grid .card { margin: 0; }
+  dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .3rem 1.15rem; margin: .2rem 0; }
+  dt { color: var(--muted); font-weight: 600; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  dd.pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .86rem; }
+  .table-wrap { width: 100%; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .42rem .5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { background: var(--code-bg); padding: .08rem .3rem; border-radius: .25rem; font-size: .88em; }
+  form.inline { display: inline; margin: 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: .55rem; align-items: center; margin-top: .8rem; }
+  button {
+    font: inherit; font-size: .9rem; padding: .38rem .72rem; border-radius: .4rem;
+    border: 1px solid var(--border); background: var(--code-bg); color: var(--fg); cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .badge {
+    display: inline-block; padding: .05rem .42rem; border: 1px solid var(--border);
+    border-radius: 999px; font-size: .8rem; background: var(--code-bg);
+  }
+  .controls { display: flex; flex-wrap: wrap; align-items: end; gap: .7rem; margin: .7rem 0; }
+  .controls label { display: flex; flex-direction: column; gap: .2rem; font-size: .86rem; color: var(--muted); }
+  .controls input {
+    font: inherit; font-size: .9rem; padding: .34rem .5rem; border-radius: .35rem;
+    border: 1px solid var(--border); background: var(--panel); color: var(--fg);
+  }
+  .add-form { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+  .add-form input[type="url"] {
+    flex: 1 1 22rem; font: inherit; padding: .42rem .55rem; border-radius: .4rem;
+    border: 1px solid var(--border); background: var(--panel); color: var(--fg);
+  }
+  nav.tabs { display: flex; flex-wrap: wrap; gap: .4rem; margin: .4rem 0 1rem; }
+  nav.tabs a {
+    text-decoration: none; color: var(--muted); padding: .32rem .68rem;
+    border: 1px solid var(--border); border-radius: .4rem; background: var(--panel);
+  }
+  nav.tabs a.active { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
+  pre.log {
+    margin: 0; padding: .75rem .85rem; background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: .45rem; overflow-x: auto; max-height: 68vh; font-size: .82rem; line-height: 1.45;
+  }
+  footer { padding-top: .4rem; padding-bottom: 2rem; font-size: .85rem; }
+  footer a { color: var(--muted); }
+  @media (max-width: 640px) {
+    dl.kv { grid-template-columns: 1fr; gap: .1rem; }
+    dt { margin-top: .35rem; }
+    body { font-size: .95rem; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-inner">
+    <div><a class="brand" href="/">dissident</a><span class="ver">{{if .Version}}v{{.Version}}{{else}}dev{{end}}</span></div>
+    <nav class="main-nav" aria-label="Primary">
+      <a href="/"{{if eq .Nav "overview"}} class="active"{{end}}>Overview</a>
+      <a href="/wan"{{if eq .Nav "wan"}} class="active"{{end}}>WAN</a>
+      <a href="/tests"{{if eq .Nav "tests"}} class="active"{{end}}>Tests</a>
+      <a href="/subscriptions"{{if eq .Nav "subscriptions"}} class="active"{{end}}>Subscriptions</a>
+      <a href="/settings"{{if eq .Nav "settings"}} class="active"{{end}}>Settings</a>
+      <a href="/logs"{{if eq .Nav "logs"}} class="active"{{end}}>Logs</a>
+    </nav>
+  </div>
+</header>
+<main class="wrap">
+{{if .Flash}}<div class="flash{{if .FlashError}} flash-error{{end}}" role="status">{{.Flash}}</div>{{end}}
+{{if .Notice}}<p class="notice">{{.Notice}}</p>{{end}}
+{{template "content" .}}
+</main>
+<footer class="wrap muted">
+  Server-rendered control panel · <a href="/healthz">healthz</a> · <a href="/readyz">readyz</a> · <a href="/metrics">metrics</a>
+</footer>
+</body>
+</html>{{end}}

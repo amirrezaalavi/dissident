@@ -1,0 +1,24 @@
+{{define "content"}}
+<h1>Logs</h1>
+<p class="muted">Tail the configured access or system log. Reads are bounded to the final 2 MiB and at most 1000 returned lines; no shell is used.</p>
+
+<nav class="tabs" aria-label="Log type">
+  {{range .Tabs}}<a href="{{.Href}}"{{if .Active}} class="active"{{end}}>{{.Label}}</a>{{end}}
+</nav>
+
+<form class="controls" method="get" action="/logs">
+  <input type="hidden" name="type" value="{{.Type}}">
+  <label>Lines
+    <input type="number" name="lines" min="1" max="1000" step="1" value="{{.Lines}}">
+  </label>
+  <label>Filter substring
+    <input type="text" name="filter" value="{{.Filter}}" placeholder="error, domain, protocol…">
+  </label>
+  <button type="submit">Apply</button>
+</form>
+
+{{if .FileNote}}<p class="muted"><code>{{.FileNote}}</code></p>{{end}}
+{{if .Message}}<p class="notice">{{.Message}}</p>{{end}}
+{{if .Content}}<pre class="log">{{range .Content}}{{.}}
+{{end}}</pre>{{end}}
+{{end}}

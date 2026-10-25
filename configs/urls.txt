@@ -1,0 +1,6 @@
+# Subscription URLs for dissident, one per line.
+# Lines starting with '#' are ignored. This demo file intentionally contains
+# no real subscriptions or credentials.
+#
+# Add subscription URLs like:
+#   https://example.invalid/subscription/example-token

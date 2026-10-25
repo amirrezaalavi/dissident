@@ -1,0 +1,71 @@
+{{define "content"}}
+<h1>Tests</h1>
+<p class="muted">Catalog and qualification view. The pipeline is strict and staged; entries are shown newest and most active first, up to 200 rows.</p>
+
+<div class="grid">
+  <section class="card">
+    <h2>Catalog</h2>
+    <dl class="kv">
+      <dt>Catalog entries</dt><dd>{{.Snapshot.CatalogCount}}</dd>
+      <dt>Supported entries</dt><dd>{{.Snapshot.SupportedCount}}</dd>
+      <dt>Currently testing</dt><dd>{{.Snapshot.Testing}}</dd>
+      <dt>Config generation</dt><dd>{{.Snapshot.Generation}}</dd>
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Cycle</h2>
+    <dl class="kv">
+      <dt>State</dt><dd>{{.CycleState}}</dd>
+      <dt>Last cycle</dt><dd>{{.LastCycle}}</dd>
+      <dt>Next cycle</dt><dd>{{.NextCycle}}</dd>
+      <dt>Last error</dt>
+      <dd>{{if .HasError}}<span class="warn">{{.LastError}}</span>{{else}}none{{end}}</dd>
+    </dl>
+    <div class="actions">
+      <form class="inline" method="post" action="/cycle/run">
+        <button type="submit" class="primary"{{if not .CanRun}} disabled{{end}}>Run cycle</button>
+      </form>
+      <form class="inline" method="post" action="/cycle/cancel">
+        <button type="submit" class="danger"{{if not .CanCancel}} disabled{{end}}>Cancel</button>
+      </form>
+    </div>
+    {{if .CycleState}}{{if eq .CycleState "running"}}<p class="muted">A cycle is running. Cancel requests a bounded stop.</p>{{end}}{{end}}
+  </section>
+</div>
+
+<section class="card">
+  <h2>Qualification results</h2>
+  {{if .Rows}}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>Protocol</th><th>Server</th><th>State</th><th>Last stage</th>
+          <th>OK / reason</th><th>TCP latency</th><th>Speed</th><th>Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range .Rows}}
+        <tr>
+          <td>{{.Name}}</td>
+          <td>{{.Protocol}}</td>
+          <td>{{.ServerPort}}</td>
+          <td><span class="badge">{{.State}}</span></td>
+          <td>{{.LastStage}}</td>
+          <td>
+            {{if eq .Result "ok"}}<span class="badge">ok</span>{{else if eq .Result "fail"}}<span class="warn">fail</span>{{else}}<span class="muted">-</span>{{end}}
+            {{if .Reason}}<div class="muted">{{.Reason}}</div>{{end}}
+          </td>
+          <td>{{.TCP}}</td>
+          <td>{{.Speed}}</td>
+          <td>{{.Updated}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No catalog entries or test results are available yet.</p>
+  {{end}}
+</section>
+{{end}}

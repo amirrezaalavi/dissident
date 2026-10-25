@@ -6,8 +6,9 @@ Imported on 2026-10-25.
 |---|---|---|
 | `viberoxy/` | https://github.com/amirrezaalavi/Viberoxy | `c01a7a8` (`origin/develop`, merge `93f2221`; quality-gating line) |
 | `viberayd/` | https://github.com/amirrezaalavi/Viberayd | `9b83a59` (`main`, merge of `fix/test-quality-verification`) |
+| `viber-console/` | https://github.com/yolka-wiz/viber-console | `a1888b8` (`main`) |
 
-Both imports used `git subtree add`, preserving full history under the
+All imports used `git subtree add`, preserving full history under the
 respective prefixes.
 
 ## Why Viberoxy `develop`, not `main`
@@ -43,12 +44,15 @@ straight cherry-pick will conflict) and re-run the suite.
 ```sh
 git remote add viberoxy https://github.com/amirrezaalavi/Viberoxy.git
 git remote add viberayd https://github.com/amirrezaalavi/Viberayd.git
+git remote add viber-console https://github.com/yolka-wiz/viber-console.git
 
 git fetch viberoxy develop main
 git fetch viberayd main
+git fetch viber-console main
 
 git subtree pull --prefix=viberoxy viberoxy develop
 git subtree pull --prefix=viberayd viberayd main
+git subtree pull --prefix=viber-console viber-console main
 ```
 
 Local pre-existing checkouts used during the feasibility study were

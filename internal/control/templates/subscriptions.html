@@ -1,0 +1,47 @@
+{{define "content"}}
+<h1>Subscriptions</h1>
+<p class="muted">Subscription sources are fetched during catalog refreshes. Only http(s) source URLs are shown; local share links are summarized and never printed.</p>
+
+<section class="card">
+  <h2>Sources</h2>
+  {{if .DataAvailable}}
+  <dl class="kv">
+    <dt>Source entries</dt><dd>{{.Total}}</dd>
+    <dt>Local links</dt><dd>{{.LocalCount}} local links (not displayed)</dd>
+  </dl>
+  {{if .URLs}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Source URL</th><th>Action</th></tr></thead>
+      <tbody>
+      {{range .URLs}}
+        <tr>
+          <td><code>{{.Display}}</code></td>
+          <td>
+            <form class="inline" method="post" action="/subscriptions/remove">
+              <input type="hidden" name="key" value="{{.Key}}">
+              <button type="submit" class="danger">Remove</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No http(s) subscription URLs are configured.</p>
+  {{end}}
+  {{end}}
+</section>
+
+{{if .DataAvailable}}
+<section class="card">
+  <h2>Add subscription</h2>
+  <p class="muted">The URL must use http:// or https://. Credentials embedded in the URL are stored but never displayed.</p>
+  <form class="add-form" method="post" action="/subscriptions/add">
+    <input type="url" name="url" required placeholder="https://example.com/subscription" aria-label="Subscription URL">
+    <button type="submit" class="primary">Add subscription</button>
+  </form>
+</section>
+{{end}}
+{{end}}

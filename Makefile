@@ -1,32 +1,48 @@
 GO ?= go
+MODULES := viberoxy viberayd viber-console
+BIN := bin/dissident
 
-.PHONY: help build vet test race check clean
+.PHONY: help build dissident dissident-test dissident-vet dissident-race vet test race check clean
 
 help:
-	@echo "build  - compile both modules"
-	@echo "vet    - run go vet on both modules"
-	@echo "test   - run both test suites"
-	@echo "race   - run both test suites with the race detector"
-	@echo "check  - build + vet + test"
+	@echo "build            - build dissident, then all legacy modules"
+	@echo "dissident        - build the dissident binary at $(BIN)"
+	@echo "dissident-test   - run dissident (root module) tests"
+	@echo "dissident-vet    - run go vet on dissident"
+	@echo "dissident-race   - run dissident tests with the race detector"
+	@echo "vet              - vet dissident and all legacy modules"
+	@echo "test             - test dissident and all legacy modules"
+	@echo "race             - race-test dissident and all legacy modules"
+	@echo "check            - build + vet + test"
 
-build:
-	cd viberoxy && $(GO) build ./...
-	cd viberayd && $(GO) build ./...
+build: dissident
+	@for m in $(MODULES); do echo "== $$m"; (cd $$m && $(GO) build ./...) || exit 1; done
 
-vet:
-	cd viberoxy && $(GO) vet ./...
-	cd viberayd && $(GO) vet ./...
+dissident:
+	@mkdir -p bin
+	$(GO) build -trimpath -o $(BIN) ./cmd/dissident
 
-test:
-	cd viberoxy && $(GO) test ./... -count=1
-	cd viberayd && $(GO) test ./... -count=1
+dissident-test:
+	$(GO) test ./... -count=1
 
-race:
-	cd viberoxy && $(GO) test -race ./... -count=1
-	cd viberayd && $(GO) test -race ./... -count=1
+dissident-vet:
+	$(GO) vet ./...
+
+dissident-race:
+	$(GO) test -race ./... -count=1
+
+vet: dissident-vet
+	@for m in $(MODULES); do echo "== $$m"; (cd $$m && $(GO) vet ./...) || exit 1; done
+
+test: dissident-test
+	@for m in $(MODULES); do echo "== $$m"; (cd $$m && $(GO) test ./... -count=1) || exit 1; done
+
+race: dissident-race
+	@for m in $(MODULES); do echo "== $$m"; (cd $$m && $(GO) test -race ./... -count=1) || exit 1; done
 
 check: build vet test
 
 clean:
-	cd viberoxy && $(GO) clean
-	cd viberayd && $(GO) clean
+	@for m in $(MODULES); do (cd $$m && $(GO) clean); done
+	$(GO) clean
+	@rm -rf bin

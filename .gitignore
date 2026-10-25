@@ -3,3 +3,6 @@
 .tmp/
 bin/
 *.test
+
+# Dissident runtime state, logs, and downloaded artifacts
+var/

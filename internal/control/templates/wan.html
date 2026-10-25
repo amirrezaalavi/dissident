@@ -1,0 +1,56 @@
+{{define "content"}}
+<h1>WAN</h1>
+<p class="muted">One active WAN with qualified standbys. Replacement is make-before-break; the only WAN actions are Replace and Remove-ready.</p>
+
+<section class="card">
+  <h2>Active WAN</h2>
+  {{if .Active}}
+  <dl class="kv">
+    <dt>Name</dt><dd>{{.Active.Name}}</dd>
+    <dt>Server</dt><dd>{{.Active.ServerPort}}</dd>
+    <dt>Protocol</dt><dd>{{.Active.Protocol}}</dd>
+    <dt>Since</dt><dd>{{.Active.Since}} <span class="muted">({{.Active.SinceAgo}})</span></dd>
+    <dt>Exit IP</dt><dd>{{.Active.ExitIP}}</dd>
+  </dl>
+  {{else}}
+  <p class="warn">No active WAN. The proxy is not ready until a standby is promoted.</p>
+  {{end}}
+  <div class="actions">
+    <form class="inline" method="post" action="/wan/replace">
+      <button type="submit" class="primary"{{if not .CanReplace}} disabled{{end}}>Replace active</button>
+    </form>
+    {{if not .CanReplace}}<span class="muted">Replacement requires at least one ready standby.</span>{{end}}
+  </div>
+</section>
+
+<section class="card">
+  <h2>Ready standbys <span class="muted">({{.ReadyCount}} / {{.ReadyTarget}} target, minimum {{.ReadyMin}})</span></h2>
+  {{if .Ready}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Server</th><th>Protocol</th><th>Score</th><th>Last check</th><th>Exit IP</th><th>Action</th></tr></thead>
+      <tbody>
+      {{range .Ready}}
+        <tr>
+          <td>{{.Name}}</td>
+          <td>{{.ServerPort}}</td>
+          <td>{{.Protocol}}</td>
+          <td class="num">{{.Score}}</td>
+          <td>{{.LastCheck}}</td>
+          <td>{{.ExitIP}}</td>
+          <td>
+            <form class="inline" method="post" action="/wan/remove">
+              <input type="hidden" name="hash" value="{{.HashPrefix}}">
+              <button type="submit" class="danger"{{if not .CanRemove}} disabled{{end}}>Remove</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No ready standbys. Run a qualification cycle from the <a href="/tests">Tests</a> page.</p>
+  {{end}}
+</section>
+{{end}}

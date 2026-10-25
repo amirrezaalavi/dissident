@@ -1,0 +1,25 @@
+{{define "content"}}
+<h1>Settings</h1>
+<p class="muted">Read-only view of the accepted configuration generation. Credentials and URL userinfo are redacted.</p>
+
+{{if .ConfigAvailable}}
+<p class="notice">This panel does not edit configuration. Edit the config file and send SIGHUP to reload it. A <code>server.panel_listen</code> change requires a restart.</p>
+
+<div class="grid">
+  {{range .Groups}}
+  <section class="card">
+    <h2>{{.Title}}</h2>
+    <dl class="kv">
+      {{range .Rows}}
+      <dt>{{.Key}}</dt><dd class="pre">{{.Value}}</dd>
+      {{end}}
+    </dl>
+  </section>
+  {{end}}
+</div>
+
+<p class="muted">Config generation: {{.Generation}}</p>
+{{else}}
+<p class="muted">No configuration is available to display.</p>
+{{end}}
+{{end}}

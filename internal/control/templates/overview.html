@@ -1,0 +1,96 @@
+{{define "content"}}
+<h1>Overview</h1>
+<p class="muted">Runtime summary. This page refreshes automatically every 5 seconds; JavaScript is not required.</p>
+
+<div class="grid">
+  <section class="card">
+    <h2>Active WAN</h2>
+    {{if .Active}}
+    <dl class="kv">
+      <dt>Name</dt><dd>{{.Active.Name}}</dd>
+      <dt>Server</dt><dd>{{.Active.ServerPort}}</dd>
+      <dt>Protocol</dt><dd>{{.Active.Protocol}}</dd>
+      <dt>Since</dt><dd>{{.Active.Since}} <span class="muted">({{.Active.SinceAgo}})</span></dd>
+      <dt>Exit IP</dt><dd>{{.Active.ExitIP}}</dd>
+    </dl>
+    {{else}}
+    <p class="warn">No active WAN. The panel is serving, but <a href="/readyz">/readyz</a> reports not ready.</p>
+    {{end}}
+  </section>
+
+  <section class="card">
+    <h2>Readiness</h2>
+    <dl class="kv">
+      <dt>Ready standbys</dt><dd><strong>{{.ReadyCount}} / {{.ReadyTarget}}</strong> target (minimum {{.ReadyMin}})</dd>
+      <dt>Catalog entries</dt><dd>{{.Snapshot.CatalogCount}}</dd>
+      <dt>Supported entries</dt><dd>{{.Snapshot.SupportedCount}}</dd>
+      <dt>Testing now</dt><dd>{{.Snapshot.Testing}}</dd>
+      <dt>Config generation</dt><dd>{{.Snapshot.Generation}}</dd>
+    </dl>
+    {{if .ReadyBelowMin}}<p class="warn">Ready standbys are below the configured minimum.</p>{{end}}
+  </section>
+
+  <section class="card">
+    <h2>Cycle</h2>
+    <dl class="kv">
+      <dt>State</dt><dd>{{.CycleState}}</dd>
+      <dt>Last cycle</dt><dd>{{.LastCycle}}</dd>
+      <dt>Next cycle</dt><dd>{{.NextCycle}}</dd>
+      <dt>Last error</dt>
+      <dd>{{if .HasError}}<span class="warn">{{.LastError}}</span>{{else}}none{{end}}</dd>
+    </dl>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Top ready entries</h2>
+  {{if .Ready}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Server</th><th>Protocol</th><th>Score</th><th>Last check</th><th>Exit IP</th></tr></thead>
+      <tbody>
+      {{range .Ready}}
+        <tr>
+          <td>{{.Name}}</td>
+          <td>{{.ServerPort}}</td>
+          <td>{{.Protocol}}</td>
+          <td class="num">{{.Score}}</td>
+          <td>{{.LastCheck}}</td>
+          <td>{{.ExitIP}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted"><a href="/wan">Manage ready standbys and replace the active WAN</a></p>
+  {{else}}
+  <p class="muted">No ready standbys yet.</p>
+  {{end}}
+</section>
+
+<section class="card">
+  <h2>Recent test results</h2>
+  {{if .Recent}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Protocol</th><th>Stage</th><th>Result</th><th>Reason</th><th>Updated</th></tr></thead>
+      <tbody>
+      {{range .Recent}}
+        <tr>
+          <td>{{.Name}}</td>
+          <td>{{.Protocol}}</td>
+          <td>{{.LastStage}}</td>
+          <td>{{.Result}}</td>
+          <td>{{if .Reason}}{{.Reason}}{{else}}<span class="muted">-</span>{{end}}</td>
+          <td>{{.Updated}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted"><a href="/tests">View the full qualification table</a></p>
+  {{else}}
+  <p class="muted">No test results yet.</p>
+  {{end}}
+</section>
+{{end}}

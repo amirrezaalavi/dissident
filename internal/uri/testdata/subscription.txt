@@ -1,0 +1,3 @@
+﻿# dissident test subscription
+vless://109d47e4-4efe-45f8-9f63-52af26e1a5e2@one.example:443?encryption=none&security=tls&sni=one.example#One
+trojan://secret@two.example:443#Two
