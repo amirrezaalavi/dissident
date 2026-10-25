@@ -15,6 +15,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dissident/internal/config"
@@ -48,8 +49,10 @@ type Options struct {
 }
 
 // Tester runs qualification stages. It holds only immutable configuration
-// after New, so concurrent Test calls are safe. Real xray work remains
-// serialized by the caller's real_workers budget.
+// after New, so concurrent Test calls are safe. The cheap, real, and speed
+// semaphores enforce test.cheap_workers, test.real_workers, and one serialized
+// speed transfer. portMu serializes free-port allocation plus xray startup so
+// concurrent deep tests cannot race for the same loopback port.
 type Tester struct {
 	test        config.TestConfig
 	urls        config.URLsConfig
@@ -59,6 +62,12 @@ type Tester struct {
 	tempDir     string
 	egressDial  func(context.Context, string, string) (net.Conn, error)
 	egressErr   error
+	dialFn      func(context.Context, string, string) (net.Conn, error)
+
+	cheapSem chan struct{}
+	realSem  chan struct{}
+	speedSem chan struct{}
+	portMu   sync.Mutex
 }
 
 // New builds a Tester, applying defaults for unset bounds and constructing
@@ -76,6 +85,9 @@ func New(opts Options) *Tester {
 		egressProxy: strings.TrimSpace(opts.EgressProxy),
 		log:         logger,
 		tempDir:     opts.TempDir,
+		cheapSem:    make(chan struct{}, test.CheapWorkers),
+		realSem:     make(chan struct{}, test.RealWorkers),
+		speedSem:    make(chan struct{}, 1),
 	}
 	if tester.egressProxy != "" {
 		dial, err := platform.NewEgressDialer(tester.egressProxy, test.TCPTimeout)
@@ -89,6 +101,12 @@ func New(opts Options) *Tester {
 }
 
 func withTestDefaults(test config.TestConfig) config.TestConfig {
+	if test.CheapWorkers < 1 {
+		test.CheapWorkers = 1
+	}
+	if test.RealWorkers < 1 {
+		test.RealWorkers = 1
+	}
 	if test.TCPTimeout <= 0 {
 		test.TCPTimeout = defaultTCPTimeout
 	}
@@ -133,6 +151,26 @@ func cloneURLs(urls config.URLsConfig) config.URLsConfig {
 	return clone
 }
 
+// acquire takes one slot from a stage semaphore, waiting for either a slot or
+// context cancellation. A nil semaphore means the stage is unbounded.
+func (t *Tester) acquire(ctx context.Context, sem chan struct{}) error {
+	if sem == nil {
+		return nil
+	}
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (t *Tester) release(sem chan struct{}) {
+	if sem != nil {
+		<-sem
+	}
+}
+
 // Test runs the strict qualification pipeline for one link. It never starts
 // xray before support, TCP, TLS, protocol, render, and preflight pass, starts
 // the real xray at most once, and stops it on every return path.
@@ -150,52 +188,93 @@ func (t *Tester) Test(ctx context.Context, link contract.Link) contract.Result {
 		return result
 	}
 
-	// 1. Static support gate.
-	if err := xraycfg.Supports(link); err != nil {
-		return fail(contract.StageParse, "parse: %s", detailOf(err))
-	}
-
-	// 2. TCP reachability.
-	latency, err := t.tcpCheck(ctx, link)
-	if err != nil {
-		return fail(contract.StageTCP, "tcp: %s", detailOf(err))
-	}
-	result.TCPLatency = latency
-
-	// 3. TLS handshake only for TLS transports.
-	if needsTLS(link) {
-		if err := t.tlsCheck(ctx, link); err != nil {
-			return fail(contract.StageTLS, "tls: %s", detailOf(err))
+	// Cheap stages run in a bounded pool: support, TCP, TLS, protocol. The
+	// slot is released before deep qualification so a slow xray or 4 MB speed
+	// transfer cannot starve the cheap prefilter.
+	cheapFailure := func() *contract.Result {
+		if err := t.acquire(ctx, t.cheapSem); err != nil {
+			failed := fail(contract.StageTCP, "tcp: %s", detailOf(err))
+			return &failed
 		}
+		defer t.release(t.cheapSem)
+
+		// 1. Static support gate.
+		if err := xraycfg.Supports(link); err != nil {
+			failed := fail(contract.StageParse, "parse: %s", detailOf(err))
+			return &failed
+		}
+
+		// 2. TCP reachability.
+		latency, err := t.tcpCheck(ctx, link)
+		if err != nil {
+			failed := fail(contract.StageTCP, "tcp: %s", detailOf(err))
+			return &failed
+		}
+		result.TCPLatency = latency
+
+		// 3. TLS handshake only for TLS transports.
+		if needsTLS(link) {
+			if err := t.tlsCheck(ctx, link); err != nil {
+				failed := fail(contract.StageTLS, "tls: %s", detailOf(err))
+				return &failed
+			}
+		}
+
+		// 4. Static credential validation; no wire handshake.
+		if err := validateProtocol(link); err != nil {
+			failed := fail(contract.StageProtocol, "protocol: %s", detailOf(err))
+			return &failed
+		}
+		return nil
+	}()
+	if cheapFailure != nil {
+		return *cheapFailure
 	}
 
-	// 4. Static credential validation; no wire handshake.
-	if err := validateProtocol(link); err != nil {
-		return fail(contract.StageProtocol, "protocol: %s", detailOf(err))
-	}
-
-	// 5. Render + xray schema preflight.
-	port, err := platform.FreePort()
-	if err != nil {
-		return fail(contract.StageRender, "render: %s", detailOf(err))
-	}
-	cfg, err := platform.RenderWithEgress(link, port, t.egressProxy)
-	if err != nil {
-		return fail(contract.StageRender, "render: %s", detailOf(err))
-	}
-	preflightCtx, preflightCancel := context.WithTimeout(ctx, t.test.XrayTimeout)
-	err = xraycfg.Preflight(preflightCtx, t.xrayBin, cfg)
-	preflightCancel()
-	if err != nil {
-		return fail(contract.StageRender, "render: %s", detailOf(err))
-	}
-
-	// 6. Start the real xray once and reuse it for the remaining stages.
-	startCtx, startCancel := context.WithTimeout(ctx, t.test.XrayTimeout)
-	xray, err := platform.StartXray(startCtx, t.xrayBin, cfg, t.tempDir)
-	startCancel()
-	if err != nil {
+	// Deep stages are bounded by test.real_workers. The slot is held through
+	// speed and stability so at most real_workers xray processes exist.
+	if err := t.acquire(ctx, t.realSem); err != nil {
 		return fail(contract.StageReal, "real: %s", detailOf(err))
+	}
+	defer t.release(t.realSem)
+
+	// 5. Render + xray schema preflight, then start the real xray once and
+	// reuse it for the remaining stages. portMu serializes allocate+start so
+	// concurrent deep tests cannot race for the same loopback port.
+	var xray *platform.Xray
+	startFailure := func() *contract.Result {
+		t.portMu.Lock()
+		defer t.portMu.Unlock()
+
+		port, err := platform.FreePort()
+		if err != nil {
+			failed := fail(contract.StageRender, "render: %s", detailOf(err))
+			return &failed
+		}
+		cfg, err := platform.RenderWithEgress(link, port, t.egressProxy)
+		if err != nil {
+			failed := fail(contract.StageRender, "render: %s", detailOf(err))
+			return &failed
+		}
+		preflightCtx, preflightCancel := context.WithTimeout(ctx, t.test.XrayTimeout)
+		err = xraycfg.Preflight(preflightCtx, t.xrayBin, cfg)
+		preflightCancel()
+		if err != nil {
+			failed := fail(contract.StageRender, "render: %s", detailOf(err))
+			return &failed
+		}
+
+		startCtx, startCancel := context.WithTimeout(ctx, t.test.XrayTimeout)
+		xray, err = platform.StartXray(startCtx, t.xrayBin, cfg, t.tempDir)
+		startCancel()
+		if err != nil {
+			failed := fail(contract.StageReal, "real: %s", detailOf(err))
+			return &failed
+		}
+		return nil
+	}()
+	if startFailure != nil {
+		return *startFailure
 	}
 	defer t.stopXray(xray)
 
@@ -223,17 +302,32 @@ func (t *Tester) Test(ctx context.Context, link contract.Link) contract.Result {
 		return fail(contract.StageContent, "content: %d/%d", pass, total)
 	}
 
-	// 8. Speed and TTFB.
-	speed, ttfb, err := t.Speed(ctx, socksAddr)
-	if err != nil {
-		return fail(contract.StageSpeed, "speed: %s", detailOf(err))
-	}
-	result.SpeedMbps = speed
-	if ttfb > 0 {
-		result.TTFB = ttfb
-	}
-	if reason := t.speedReason(speed, result.TTFB); reason != "" {
-		return fail(contract.StageSpeed, "%s", reason)
+	// 8. Speed and TTFB. Only one 4 MB transfer runs at a time regardless of
+	// how many deep tests are in flight.
+	speedFailure := func() *contract.Result {
+		if err := t.acquire(ctx, t.speedSem); err != nil {
+			failed := fail(contract.StageSpeed, "speed: %s", detailOf(err))
+			return &failed
+		}
+		defer t.release(t.speedSem)
+
+		speed, ttfb, err := t.Speed(ctx, socksAddr)
+		if err != nil {
+			failed := fail(contract.StageSpeed, "speed: %s", detailOf(err))
+			return &failed
+		}
+		result.SpeedMbps = speed
+		if ttfb > 0 {
+			result.TTFB = ttfb
+		}
+		if reason := t.speedReason(speed, result.TTFB); reason != "" {
+			failed := fail(contract.StageSpeed, "%s", reason)
+			return &failed
+		}
+		return nil
+	}()
+	if speedFailure != nil {
+		return *speedFailure
 	}
 
 	// 9. Stability: StabilityPasses-1 additional verify successes.
@@ -275,17 +369,26 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 	if err := validateProtocol(link); err != nil {
 		return fail(contract.StageProtocol, "protocol: %s", detailOf(err))
 	}
+	if err := t.acquire(ctx, t.realSem); err != nil {
+		return fail(contract.StageReal, "real: %s", detailOf(err))
+	}
+	defer t.release(t.realSem)
+
+	t.portMu.Lock()
 	port, err := platform.FreePort()
 	if err != nil {
+		t.portMu.Unlock()
 		return fail(contract.StageRender, "render: %s", detailOf(err))
 	}
 	cfg, err := platform.RenderWithEgress(link, port, t.egressProxy)
 	if err != nil {
+		t.portMu.Unlock()
 		return fail(contract.StageRender, "render: %s", detailOf(err))
 	}
 	startCtx, startCancel := context.WithTimeout(ctx, t.test.XrayTimeout)
 	xray, err := platform.StartXray(startCtx, t.xrayBin, cfg, t.tempDir)
 	startCancel()
+	t.portMu.Unlock()
 	if err != nil {
 		return fail(contract.StageReal, "real: %s", detailOf(err))
 	}
@@ -310,7 +413,11 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 
 	measuredStage := contract.StageReal
 	if t.test.MinSpeedMbps > 0 || t.test.MaxTTFBMs > 0 {
+		if err := t.acquire(ctx, t.speedSem); err != nil {
+			return fail(contract.StageSpeed, "speed: %s", detailOf(err))
+		}
 		speed, ttfb, err := t.Speed(ctx, socksAddr)
+		t.release(t.speedSem)
 		if err != nil {
 			return fail(contract.StageSpeed, "speed: %s", detailOf(err))
 		}
@@ -372,6 +479,9 @@ func (t *Tester) tlsCheck(ctx context.Context, link contract.Link) error {
 
 // dial uses the egress dialer when configured, otherwise direct TCP.
 func (t *Tester) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if t.dialFn != nil {
+		return t.dialFn(ctx, network, address)
+	}
 	if t.egressErr != nil {
 		return nil, t.egressErr
 	}

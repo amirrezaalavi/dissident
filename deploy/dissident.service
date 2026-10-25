@@ -1,0 +1,25 @@
+[Unit]
+Description=dissident - one-process subscription catalog, WAN pool, proxy, and panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dissident
+Group=dissident
+ExecStart=/opt/dissident/dissident -config /etc/dissident/dissident.conf
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+LimitNOFILE=65536
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dissident /var/log/dissident
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -138,6 +138,8 @@ func (c *Config) set(key, value string) error {
 		return setInt(&c.Cycle.ReadyMin, value)
 	case "cycle.ready_target":
 		return setInt(&c.Cycle.ReadyTarget, value)
+	case "cycle.failed_retry":
+		return setDuration(&c.Cycle.FailedRetry, value)
 
 	case "swap.drain_timeout":
 		return setDuration(&c.Swap.DrainTimeout, value)

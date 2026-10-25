@@ -40,6 +40,9 @@ type CycleConfig struct {
 	ProbeBudgetPerMin int
 	ReadyMin          int
 	ReadyTarget       int
+	// FailedRetry is the cooldown before a failed catalog entry is retried.
+	// It stops refill cycles from hammering the same unreachable links.
+	FailedRetry time.Duration
 }
 
 // SwapConfig bounds active-WAN drain and standby promotion.
@@ -112,6 +115,7 @@ func Defaults() Config {
 			ProbeBudgetPerMin: 60,
 			ReadyMin:          3,
 			ReadyTarget:       5,
+			FailedRetry:       30 * time.Minute,
 		},
 		Swap: SwapConfig{
 			DrainTimeout:     30 * time.Second,

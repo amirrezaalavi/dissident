@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"dissident/internal/catalog"
@@ -95,124 +96,140 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		m.logger.Info("wan: cycle merged sources", "links", len(links), "added", added)
 	}
 
-	// Testing continues even after a fetch failure so pending catalog entries
-	// can still fill the ready list or install an active WAN. Failed entries
-	// remain Pending, so remember everything attempted in this cycle to make
-	// progress finite and preserve the "pending exhausted" stop condition.
-	attempted := make(map[string]struct{})
-	for {
-		if err := cycleCtx.Err(); err != nil {
-			if cycleErr == nil {
-				cycleErr = err
-			}
-			_ = m.saveState()
-			return cycleErr
-		}
+	// Build one finite queue for this cycle. Failed entries inside the retry
+	// cooldown are left for a later cycle instead of being hammered by every
+	// low-ready refill.
+	m.mu.Lock()
+	activeHash := ""
+	if m.active != nil {
+		activeHash = m.active.meta.Link.Hash
+	}
+	readyHashes := m.readyHashesLocked()
+	m.mu.Unlock()
 
-		active := m.hasActive()
-		m.mu.Lock()
-		readyLen := len(m.ready)
-		activeHash := ""
-		if m.active != nil {
-			activeHash = m.active.meta.Link.Hash
-		}
-		readyHashes := m.readyHashesLocked()
-		m.mu.Unlock()
-		if active && readyLen >= target {
-			break
-		}
-
-		pending := m.catalog.Pending(0)
-		var next *contract.Entry
-		for i := range pending {
-			e := pending[i]
-			if e.Link.Hash == "" || e.Link.Hash == activeHash {
-				continue
-			}
-			if _, ok := readyHashes[e.Link.Hash]; ok {
-				continue
-			}
-			if _, ok := attempted[e.Link.Hash]; ok {
-				continue
-			}
-			if active && readyLen >= target {
-				break
-			}
-			next = &e
-			break
-		}
-		if next == nil {
-			break
-		}
-		entry := *next
-		attempted[entry.Link.Hash] = struct{}{}
-
-		m.markCatalog(entry.Link.Hash, contract.StateTesting, contract.Result{
-			Hash: entry.Link.Hash, Stage: contract.StageReal, At: m.now().UTC(),
-		})
-		res := m.testOne(cycleCtx, entry.Link)
-		if cycleCtx.Err() != nil {
-			// The test was interrupted, so the entry must not stay in the
-			// testing state (Pending would never select it again).
-			if res.Hash == "" {
-				res.Hash = entry.Link.Hash
-			}
-			res.OK = false
-			if res.Reason == "" {
-				res.Reason = "cycle canceled"
-			}
-			if res.At.IsZero() {
-				res.At = m.now().UTC()
-			}
-			m.markCatalog(entry.Link.Hash, contract.StateFailed, res)
-			if cycleErr == nil {
-				cycleErr = cycleCtx.Err()
-			}
-			_ = m.saveState()
-			return cycleErr
-		}
-		res.Hash = entry.Link.Hash
-		if res.At.IsZero() {
-			res.At = m.now().UTC()
-		}
-		if !res.OK {
-			m.markCatalog(entry.Link.Hash, contract.StateFailed, res)
-			if res.Reason != "" {
-				m.setLastError(res.Reason)
-			}
+	now := m.now().UTC()
+	cooldown := cfg.Cycle.FailedRetry
+	if cooldown < 0 {
+		cooldown = 0
+	}
+	queue := make([]contract.Entry, 0)
+	for _, entry := range m.catalog.Pending(0) {
+		if entry.Link.Hash == "" || entry.Link.Hash == activeHash {
 			continue
 		}
+		if _, ok := readyHashes[entry.Link.Hash]; ok {
+			continue
+		}
+		if entry.State == contract.StateFailed && cooldown > 0 && now.Sub(entry.Updated) < cooldown {
+			continue
+		}
+		queue = append(queue, entry)
+	}
+	if testCap := cfg.Test.RealTestCap; testCap > 0 && len(queue) > testCap {
+		queue = queue[:testCap]
+	}
 
-		cand := m.readyFrom(entry, res)
-		if !active && !m.hasActive() {
-			// Promote the first passer immediately instead of waiting for the
-			// rest of the cycle. If another actor won the race, keep this
-			// candidate as a standby rather than dropping it.
-			promoted, err := m.promoteReady(cycleCtx, cand)
-			if err != nil {
-				if cycleCtx.Err() != nil {
-					m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
-						Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
-						Reason: "cycle canceled", At: m.now().UTC(),
-					})
-					cycleErr = cycleCtx.Err()
-					_ = m.saveState()
-					return cycleErr
-				}
-				m.logger.Warn("wan: cycle promotion failed", "hash", entry.Link.Hash, "err", err)
+	workers := cfg.Test.CheapWorkers
+	if workers < 2 {
+		workers = 2
+	}
+	workers *= 2
+	if realWorkers := cfg.Test.RealWorkers; realWorkers > workers {
+		workers = realWorkers
+	}
+	if workers > 64 {
+		workers = 64
+	}
+	m.logger.Info("wan: cycle testing",
+		"queued", len(queue),
+		"workers", workers,
+		"cheap_workers", cfg.Test.CheapWorkers,
+		"real_workers", cfg.Test.RealWorkers,
+		"ready", m.readyCount(),
+		"target", target)
+
+	type outcome struct {
+		entry contract.Entry
+		res   contract.Result
+	}
+	tasks := make(chan contract.Entry)
+	results := make(chan outcome, workers)
+	var workersWG sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		workersWG.Add(1)
+		go func() {
+			defer workersWG.Done()
+			for entry := range tasks {
+				results <- outcome{entry: entry, res: m.testOne(cycleCtx, entry.Link)}
+			}
+		}()
+	}
+	go func() {
+		workersWG.Wait()
+		close(results)
+	}()
+
+	stop := false
+	canceled := false
+	launched := 0
+	inFlight := 0
+	for {
+		for !stop && !canceled && launched < len(queue) && inFlight < workers {
+			if err := cycleCtx.Err(); err != nil {
+				canceled = true
+				break
+			}
+			entry := queue[launched]
+			launched++
+			m.markCatalog(entry.Link.Hash, contract.StateTesting, contract.Result{
+				Hash: entry.Link.Hash, Stage: contract.StageReal, At: m.now().UTC(),
+			})
+			select {
+			case tasks <- entry:
+				inFlight++
+			case <-cycleCtx.Done():
 				m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
 					Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
-					Reason: err.Error(), At: m.now().UTC(),
+					Reason: "cycle canceled", At: m.now().UTC(),
 				})
-				continue
+				canceled = true
 			}
-			if promoted {
-				continue
+			if m.hasActive() && m.readyCount() >= target {
+				stop = true
 			}
 		}
 
-		m.addReady(cand, target)
-		m.markCatalog(entry.Link.Hash, contract.StateReady, res)
+		if inFlight == 0 {
+			break
+		}
+		out, ok := <-results
+		if !ok {
+			break
+		}
+		inFlight--
+		if canceled || cycleCtx.Err() != nil {
+			m.markCatalog(out.entry.Link.Hash, contract.StateFailed, contract.Result{
+				Hash: out.entry.Link.Hash, Stage: contract.StageReal, OK: false,
+				Reason: "cycle canceled", At: m.now().UTC(),
+			})
+			continue
+		}
+		m.applyCycleResult(cycleCtx, out.entry, out.res, target)
+		if m.hasActive() && m.readyCount() >= target {
+			stop = true
+		}
+	}
+
+	close(tasks)
+	workersWG.Wait()
+	if cycleCtx.Err() != nil {
+		canceled = true
+		if cycleErr == nil {
+			cycleErr = cycleCtx.Err()
+		}
+	}
+	if canceled && cycleErr == nil {
+		cycleErr = context.Canceled
 	}
 
 	_ = m.saveState()
@@ -225,6 +242,58 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		m.logger.Info("wan: cycle finished below ready_min", "ready", m.readyCount(), "ready_min", cfg.Cycle.ReadyMin)
 	}
 	return cycleErr
+}
+
+// applyCycleResult installs one completed qualification result. It is called
+// only by the cycle coordinator, so active/ready mutations stay serialized even
+// though the tests themselves run concurrently.
+func (m *Manager) applyCycleResult(ctx context.Context, entry contract.Entry, res contract.Result, target int) {
+	if res.Hash == "" {
+		res.Hash = entry.Link.Hash
+	}
+	if res.At.IsZero() {
+		res.At = m.now().UTC()
+	}
+	if !res.OK {
+		m.markCatalog(entry.Link.Hash, contract.StateFailed, res)
+		if res.Reason != "" {
+			m.setLastError(res.Reason)
+		}
+		return
+	}
+
+	cand := m.readyFrom(entry, res)
+	if !m.hasActive() {
+		promoted, err := m.promoteReady(ctx, cand)
+		if err != nil {
+			if ctx.Err() != nil {
+				m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
+					Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
+					Reason: "cycle canceled", At: m.now().UTC(),
+				})
+				return
+			}
+			m.logger.Warn("wan: cycle promotion failed", "hash", entry.Link.Hash, "err", err)
+			m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
+				Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
+				Reason: err.Error(), At: m.now().UTC(),
+			})
+			return
+		}
+		if promoted {
+			return
+		}
+	}
+
+	// A burst of concurrent passes can finish after the target is already
+	// full. Keep those entries in the catalog for the next cycle instead of
+	// marking a ready entry that addReady immediately drops.
+	if m.readyCount() >= target {
+		m.markCatalog(entry.Link.Hash, contract.StateCatalog, res)
+		return
+	}
+	m.addReady(cand, target)
+	m.markCatalog(entry.Link.Hash, contract.StateReady, res)
 }
 
 func (m *Manager) readyFrom(entry contract.Entry, res contract.Result) contract.Ready {

@@ -40,6 +40,7 @@ func TestDefaults(t *testing.T) {
 		{"probe window", cfg.Cycle.ProbeWindow, 8 * time.Second},
 		{"ready min", cfg.Cycle.ReadyMin, 3},
 		{"ready target", cfg.Cycle.ReadyTarget, 5},
+		{"failed retry", cfg.Cycle.FailedRetry, 30 * time.Minute},
 		{"drain timeout", cfg.Swap.DrainTimeout, 30 * time.Second},
 		{"cheap workers", cfg.Test.CheapWorkers, 8},
 		{"speed size", cfg.Test.SpeedSize, int64(4000000)},
@@ -73,6 +74,7 @@ xray_bin = /opt/xray
 [cycle]
 interval = 60s
 ready_target = 4
+failed_retry = 45m
 
 [test]
 content_quorum = 2
@@ -99,6 +101,9 @@ access = false
 	}
 	if cfg.Cycle.ReadyTarget != 4 || cfg.Cycle.ReadyMin != 3 {
 		t.Errorf("ready target/min = %d/%d", cfg.Cycle.ReadyTarget, cfg.Cycle.ReadyMin)
+	}
+	if cfg.Cycle.FailedRetry != 45*time.Minute {
+		t.Errorf("failed retry = %v", cfg.Cycle.FailedRetry)
 	}
 	if got := len(cfg.URLs.Content); got != 2 {
 		t.Errorf("content urls = %d, want 2", got)

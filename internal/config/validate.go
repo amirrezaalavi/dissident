@@ -70,6 +70,9 @@ func (c Config) Validate() error {
 	if c.Cycle.ReadyMin > c.Cycle.ReadyTarget {
 		add("cycle.ready_min (%d) must not exceed cycle.ready_target (%d)", c.Cycle.ReadyMin, c.Cycle.ReadyTarget)
 	}
+	if c.Cycle.FailedRetry <= 0 {
+		add("cycle.failed_retry must be greater than zero")
+	}
 
 	if c.Swap.DrainTimeout <= 0 {
 		add("swap.drain_timeout must be greater than zero")

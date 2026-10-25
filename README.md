@@ -42,7 +42,9 @@ half-applied config can never run.
   support → TCP → TLS (TLS transports only) → protocol → render → `xray -test`
   → real HTTP → content quorum → speed/TTFB → stability. A config that fails a
   stage never reaches the next one. The real xray is started once per candidate
-  and stopped on every path.
+  and stopped on every path. Cheap stages run in `test.cheap_workers` parallel
+  workers; deep tests are bounded by `test.real_workers`; the 4 MB speed
+  transfer is serialized.
 - **WAN runtime**: exactly one active xray client, a persisted ready list, 15s
   liveness (3 probes / 8s), passive-failure burst, and make-before-break
   replacement with a drain window. The only manual WAN actions are **Replace**
@@ -88,6 +90,34 @@ go test -race ./... -count=1
 The demo was exercised against a real subscription link through a restricted
 host: panel ready, CONNECT 204, SOCKS5 200, access log populated, manual Replace
 returned 303 and traffic continued. See `docs/M7-DEMO.md` for the exact checks.
+
+## Production install (systemd)
+
+The `deploy/` directory contains the production unit and configuration used
+for the single-process service. It targets a dedicated `dissident` user and
+puts mutable state under `/var/lib/dissident`.
+
+```sh
+make dissident
+sudo useradd --system --no-create-home --home-dir /var/lib/dissident \
+  --shell /usr/sbin/nologin --user-group dissident
+sudo install -d -o root -g root -m 0755 /opt/dissident
+sudo install -o root -g root -m 0755 bin/dissident /opt/dissident/dissident
+sudo install -d -o root -g dissident -m 0750 /etc/dissident
+sudo install -o root -g dissident -m 0640 deploy/dissident.conf /etc/dissident/dissident.conf
+sudo install -d -o dissident -g dissident -m 0750 /var/lib/dissident /var/log/dissident
+sudo install -o root -g root -m 0644 deploy/dissident.service /etc/systemd/system/dissident.service
+# Put share links or subscription URLs here; the panel may add subscriptions later.
+sudo install -o dissident -g dissident -m 0600 /path/to/urls.txt /var/lib/dissident/urls.txt
+sudo systemctl daemon-reload
+sudo systemctl enable --now dissident
+```
+
+The shipped config uses `ready_target = 5` and `ready_min = 5` so the service
+actively refills until five standby WANs are qualified. Panel `8090` and proxy
+`10909` bind `0.0.0.0`; keep the host on a trusted network until panel auth and
+TLS exist. `state.json`, `urls.txt`, and the access/system logs are writable
+only by the service user.
 
 ## Limitations
 

@@ -221,6 +221,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				{"cycle.probe_budget_per_min", strconv.Itoa(cfg.Cycle.ProbeBudgetPerMin)},
 				{"cycle.ready_min", strconv.Itoa(cfg.Cycle.ReadyMin)},
 				{"cycle.ready_target", strconv.Itoa(cfg.Cycle.ReadyTarget)},
+				{"cycle.failed_retry", durationText(cfg.Cycle.FailedRetry)},
 			},
 		},
 		{
