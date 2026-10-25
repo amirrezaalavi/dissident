@@ -1,0 +1,346 @@
+package main
+
+import (
+	"math"
+	"net/http/httptest"
+	"os/exec"
+	"strconv"
+	"strings"
+	"testing"
+	"viberoxy/internal/proxycfg"
+	"viberoxy/internal/xrayproc"
+)
+
+// isolateMetricSeries gives a test its own view of one series of a
+// process-global metric: the series starts genuinely unset ("never recorded"
+// — Value reports 0 and the exposition omits it) regardless of which tests
+// ran before, and whatever state existed beforehand is restored on cleanup.
+// Global metrics are shared across the package, so any test asserting an
+// unset value must establish that state itself rather than assume a virgin
+// registry (go test -shuffle=on reorders tests between runs).
+func isolateMetricSeries(t *testing.T, m *Metric, labelValues ...string) {
+	t.Helper()
+	key := strings.Join(labelValues, "\x00")
+	m.mu.Lock()
+	prev, had := m.series[key]
+	delete(m.series, key)
+	m.mu.Unlock()
+	t.Cleanup(func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if had {
+			m.series[key] = prev
+		} else {
+			delete(m.series, key)
+		}
+	})
+}
+
+func TestRegistry_ExpositionFormat(t *testing.T) {
+	reg := NewRegistry()
+	g := NewGauge("test_gauge", "A test gauge.", "wan")
+	reg.Register(g)
+	g.Set(42, "0")
+	g.Set(7, "1")
+
+	var sb strings.Builder
+	if err := reg.Write(&sb); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	out := sb.String()
+
+	for _, want := range []string{
+		"# HELP test_gauge A test gauge.",
+		"# TYPE test_gauge gauge",
+		`test_gauge{wan="0"} 42`,
+		`test_gauge{wan="1"} 7`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exposition missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestCounter_Increments(t *testing.T) {
+	reg := NewRegistry()
+	c := NewCounter("test_counter_total", "A test counter.", "proto")
+	reg.Register(c)
+	c.Inc("connect")
+	c.Add(4, "connect")
+
+	var sb strings.Builder
+	if err := reg.Write(&sb); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	out := sb.String()
+
+	for _, want := range []string{
+		"# HELP test_counter_total A test counter.",
+		"# TYPE test_counter_total counter",
+		`test_counter_total{proto="connect"} 5`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exposition missing %q in:\n%s", want, out)
+		}
+	}
+
+	if v := c.Value("connect"); v != 5 {
+		t.Errorf("Value = %v, want 5", v)
+	}
+}
+
+func TestHistogram_Observe(t *testing.T) {
+	reg := NewRegistry()
+	h := NewHistogram("test_histogram_seconds", "A test histogram.")
+	reg.Register(h)
+	h.Observe(0.03)
+	h.Observe(0.25)
+	h.Observe(1.0)
+
+	var sb strings.Builder
+	if err := reg.Write(&sb); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	out := sb.String()
+
+	for _, want := range []string{
+		"# HELP test_histogram_seconds A test histogram.",
+		"# TYPE test_histogram_seconds histogram",
+		`test_histogram_seconds_bucket{le="0.05"} 1`,
+		`test_histogram_seconds_bucket{le="0.1"} 1`,
+		`test_histogram_seconds_bucket{le="0.25"} 2`,
+		`test_histogram_seconds_bucket{le="0.5"} 2`,
+		`test_histogram_seconds_bucket{le="1"} 3`,
+		`test_histogram_seconds_bucket{le="2"} 3`,
+		`test_histogram_seconds_bucket{le="4"} 3`,
+		`test_histogram_seconds_bucket{le="8"} 3`,
+		`test_histogram_seconds_bucket{le="16"} 3`,
+		`test_histogram_seconds_bucket{le="+Inf"} 3`,
+		`test_histogram_seconds_count 3`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exposition missing %q in:\n%s", want, out)
+		}
+	}
+
+	found := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "test_histogram_seconds_sum ") {
+			v, err := strconv.ParseFloat(strings.TrimPrefix(line, "test_histogram_seconds_sum "), 64)
+			if err != nil {
+				t.Fatalf("parse sum line %q: %v", line, err)
+			}
+			if math.Abs(v-1.28) > 1e-9 {
+				t.Errorf("sum = %v, want ~1.28", v)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("exposition missing test_histogram_seconds_sum line")
+	}
+}
+
+func TestHistogram_WithLabels(t *testing.T) {
+	reg := NewRegistry()
+	h := NewHistogram("test_labelled_seconds", "help", "wan")
+	reg.Register(h)
+	h.Observe(0.5, "0")
+
+	var sb strings.Builder
+	if err := reg.Write(&sb); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	out := sb.String()
+
+	for _, want := range []string{
+		`test_labelled_seconds_bucket{wan="0",le="0.5"} 1`,
+		`test_labelled_seconds_bucket{wan="0",le="+Inf"} 1`,
+		`test_labelled_seconds_sum{wan="0"} 0.5`,
+		`test_labelled_seconds_count{wan="0"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exposition missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestLabelEscaping(t *testing.T) {
+	reg := NewRegistry()
+	g := NewGauge("test_escape", "help", "lbl")
+	reg.Register(g)
+	g.Set(1, "a\"b\\c\nd")
+
+	var sb strings.Builder
+	if err := reg.Write(&sb); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if !strings.Contains(sb.String(), `test_escape{lbl="a\"b\\c\nd"} 1`) {
+		t.Errorf("label escaping failed, got:\n%s", sb.String())
+	}
+}
+
+func TestObservabilityHandler(t *testing.T) {
+	pool := NewWANPool(1, 10700)
+	h := NewObservabilityHandler(pool)
+
+	// /healthz is always 200.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != 200 {
+		t.Errorf("healthz = %d, want 200", rec.Code)
+	}
+
+	// /readyz is 503 with no active WANs.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
+	if rec.Code != 503 {
+		t.Errorf("readyz (no wans) = %d, want 503", rec.Code)
+	}
+
+	// /readyz is 200 with an active WAN that has a non-nil Cmd (routable).
+	pool.Slots[0].State = StateActive
+	sleepCmd := exec.Command("sleep", "9999")
+	if err := sleepCmd.Start(); err != nil {
+		t.Fatalf("start cmd: %v", err)
+	}
+	defer sleepCmd.Process.Kill()
+	pool.Slots[0].Cmd = xrayproc.Wrap(sleepCmd, "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
+	if rec.Code != 200 {
+		t.Errorf("readyz (active) = %d, want 200", rec.Code)
+	}
+
+	// /metrics serves the global registry in Prometheus text format.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != 200 {
+		t.Errorf("metrics = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("metrics Content-Type = %q, want text/plain", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"# HELP viberoxy_wans_active",
+		"# TYPE viberoxy_wans_active gauge",
+		"# HELP viberoxy_wan_stability",
+		"# TYPE viberoxy_wan_stability gauge",
+		"# HELP viberoxy_proxy_connections_total",
+		"# TYPE viberoxy_proxy_connections_total counter",
+		"# TYPE viberoxy_proxy_latency_seconds histogram",
+		`viberoxy_build_info{version="dev"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q in:\n%s", want, body)
+		}
+	}
+}
+
+func TestRefreshPoolMetrics(t *testing.T) {
+	// Slot 1's speed series must be genuinely unset: refreshPoolMetrics only
+	// writes speeds > 0, so any earlier write from another test would poison
+	// the "no speed recorded" assertion below.
+	isolateMetricSeries(t, metricWanSpeedMbps, "1")
+
+	pool := NewWANPool(2, 10700)
+	pool.Slots[0].State = StateActive
+	pool.SetSlotSpeedMbps(0, 12.5)
+
+	refreshPoolMetrics(pool)
+
+	if v := metricWansActive.Value(); v != 1 {
+		t.Errorf("wans_active = %v, want 1", v)
+	}
+	if v := metricWanSpeedMbps.Value("0"); v != 12.5 {
+		t.Errorf("wan_speed_mbps[0] = %v, want 12.5", v)
+	}
+	if v := metricWanSpeedMbps.Value("1"); v != 0 {
+		t.Errorf("wan_speed_mbps[1] = %v, want 0 (no speed recorded)", v)
+	}
+}
+
+// TestRefreshPoolMetricsTTFB covers both halves of the TTFB series: the
+// gauge must carry the measured value, and it must actually be REGISTERED —
+// a metric that is set but never registered renders nothing, which is how
+// the series was silently missing on the first deploy.
+func TestRefreshPoolMetricsTTFB(t *testing.T) {
+	isolateMetricSeries(t, metricWanTTFBMs, "0")
+
+	pool := NewWANPool(1, 10700)
+	pool.Slots[0].State = StateActive
+	pool.SetSlotTTFB(0, 2241)
+
+	refreshPoolMetrics(pool)
+	if v := metricWanTTFBMs.Value("0"); v != 2241 {
+		t.Errorf("wan_ttfb_ms[0] = %v, want 2241", v)
+	}
+
+	rec := httptest.NewRecorder()
+	NewObservabilityHandler(pool).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if body := rec.Body.String(); !strings.Contains(body, `viberoxy_wan_ttfb_ms{index="0"} 2241`) {
+		t.Errorf("ttfb gauge not rendered by /metrics:\n%s", body)
+	}
+}
+
+func TestMetricWanStability(t *testing.T) {
+	// Other tests write these series via SetSlotStability (pool state is
+	// per-test, but the gauge is process-global), so establish the "never
+	// probed" state explicitly instead of assuming a virgin registry.
+	isolateMetricSeries(t, metricWanStability, "0")
+	isolateMetricSeries(t, metricWanStability, "1")
+
+	pool := NewWANPool(2, 10700)
+
+	// Unknown/never probed: gauge stays unset (0).
+	if v := metricWanStability.Value("0"); v != 0 {
+		t.Errorf("wan_stability[0] = %v, want 0 (unset)", v)
+	}
+
+	pool.SetSlotStability(0, 2)
+	if v := metricWanStability.Value("0"); v != 2 {
+		t.Errorf("wan_stability[0] = %v, want 2", v)
+	}
+
+	// Out-of-range writes must not touch any series.
+	pool.SetSlotStability(99, 9)
+	if v := metricWanStability.Value("1"); v != 0 {
+		t.Errorf("wan_stability[1] = %v, want 0 (untouched)", v)
+	}
+}
+
+func TestParseConfig_MetricsEnv(t *testing.T) {
+	setenv(t, "SUBSCRIBER_URL", "https://example.com/sub")
+	setenv(t, "METRICS_PORT", "9090")
+	setenv(t, "ACCESS_LOG", "false")
+
+	cfg, err := proxycfg.ParseConfig()
+	if err != nil {
+		t.Fatalf("parseConfig() error: %v", err)
+	}
+	if cfg.MetricsPort != 9090 {
+		t.Errorf("MetricsPort = %d, want 9090", cfg.MetricsPort)
+	}
+	if cfg.AccessLog != false {
+		t.Errorf("AccessLog = %v, want false", cfg.AccessLog)
+	}
+}
+
+func TestParseConfig_InvalidMetricsPort(t *testing.T) {
+	setenv(t, "SUBSCRIBER_URL", "https://example.com/sub")
+	setenv(t, "METRICS_PORT", "70000")
+
+	if _, err := proxycfg.ParseConfig(); err == nil {
+		t.Fatal("expected error for METRICS_PORT=70000, got nil")
+	}
+}
+
+func TestParseConfig_InvalidAccessLog(t *testing.T) {
+	setenv(t, "SUBSCRIBER_URL", "https://example.com/sub")
+	setenv(t, "ACCESS_LOG", "maybe")
+
+	if _, err := proxycfg.ParseConfig(); err == nil {
+		t.Fatal("expected error for ACCESS_LOG=maybe, got nil")
+	}
+}
