@@ -52,8 +52,11 @@ Immediate milestone: agree on the first behavioural changes, then either
 ## Provenance
 
 Both trees were imported with `git subtree`, so `git log` still shows the
-original commits. See [docs/PROVENANCE.md](docs/PROVENANCE.md) for upstream
-URLs, imported revisions, and the one significant branch divergence.
+original commits. Viberoxy is based on the quality-gating `develop` line
+(`c01a7a8`) because upstream `main` currently fails two of its own tests; the
+`main` import is archived at tag `archive/viberoxy-main-1ae5974`. See
+[docs/PROVENANCE.md](docs/PROVENANCE.md) for URLs, revisions, and what that
+divergence means for the merge.
 
 ## Licence
 

@@ -1,39 +1,55 @@
 # Provenance
 
-Imported on 2026-10-25 from the upstream default branches.
+Imported on 2026-10-25.
 
 | Subtree | Upstream | Imported revision |
 |---|---|---|
-| `viberoxy/` | https://github.com/amirrezaalavi/Viberoxy | `1ae5974` (`main`, "docs: merge control API documentation") |
+| `viberoxy/` | https://github.com/amirrezaalavi/Viberoxy | `c01a7a8` (`origin/develop`, merge `93f2221`; quality-gating line) |
 | `viberayd/` | https://github.com/amirrezaalavi/Viberayd | `9b83a59` (`main`, merge of `fix/test-quality-verification`) |
 
 Both imports used `git subtree add`, preserving full history under the
-respective prefixes. To pull future upstream changes:
+respective prefixes.
+
+## Why Viberoxy `develop`, not `main`
+
+At import time `origin/main` (`1ae5974`) and `origin/develop` (`c01a7a8` /
+merge `93f2221`) had diverged: `develop` had **80 commits not in `main`**
+(health and leak guards, TTFB gating, repeat-pass promotion, degraded
+fallback, stability probes, and their tests), while `main` had 2 commits not
+in `develop` (WAN drop/replacement control API and docs).
+
+The first import used `main`, but that tree failed its own test suite
+consistently on this machine:
+
+- `TestTestSpeed`: `main` defaults `BuildXrayConfig` to mux-on, while the test's
+  mock SOCKS server relays raw bytes and cannot speak Mux.Cool.
+- `TestStartup_DegradedBoot`: proxy never became reachable with 1 of 2 WANs
+  within 15 s.
+
+The same tests pass on `develop`, and the full `develop` suite is green
+(15 packages). The `main` import is kept for reference:
+
+```sh
+git tag -l 'archive/*'          # archive/viberoxy-main-1ae5974
+git show archive/viberoxy-main-1ae5974 --stat
+```
+
+**Open item:** `main`'s WAN drop/replacement API is not in this baseline. If it
+is wanted, port it onto `develop` (the layouts differ substantially, so a
+straight cherry-pick will conflict) and re-run the suite.
+
+## Pulling upstream updates
 
 ```sh
 git remote add viberoxy https://github.com/amirrezaalavi/Viberoxy.git
 git remote add viberayd https://github.com/amirrezaalavi/Viberayd.git
-git fetch viberoxy main
+
+git fetch viberoxy develop main
 git fetch viberayd main
-git subtree pull --prefix=viberoxy viberoxy main
+
+git subtree pull --prefix=viberoxy viberoxy develop
 git subtree pull --prefix=viberayd viberayd main
 ```
-
-## Known divergence: Viberoxy `main` vs `develop`
-
-At import time, Viberoxy's `origin/main` and `origin/develop` had diverged:
-
-- `main` (`1ae5974`): adds the WAN drop/replacement control API and docs.
-- `develop` / `fix/quality-gating` (`93f2221` / `c01a7a8`): **80 commits not
-  in `main`**, covering health/leak guards, TTFB gating, repeat-pass
-  promotion, degraded fallback, and related tests. This is the baseline used
-  by `docs/MERGE-FEASIBILITY.md`.
-- `main` has 2 commits not in `develop`.
-
-The monorepo currently tracks `main` because that is the upstream default.
-If the quality-gating line is the intended base, switch the subtree to
-`develop` (or merge the two lines) **before** starting the refactor, so the
-merged service does not silently lose those fixes.
 
 Local pre-existing checkouts used during the feasibility study were
 `/home/netcon/playground/ai/Viberoxy-fix` (at `c01a7a8`) and
