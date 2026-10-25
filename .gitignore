@@ -1,0 +1,5 @@
+# Workspace-local build caches and scratch files
+.cache/
+.tmp/
+bin/
+*.test
