@@ -51,6 +51,40 @@ func TestCycleRunsTestsConcurrently(t *testing.T) {
 	}
 }
 
+func TestCyclePromotesReadyWhenNoActive(t *testing.T) {
+	m, fr, _ := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 3
+	})
+	setReady(m, testReady("restored-standby", 7))
+
+	if err := m.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	if got := activeHash(m); got != "restored-standby" {
+		t.Fatalf("active = %q, want restored-standby", got)
+	}
+	if got := len(fr.promotionLinks()); got != 1 {
+		t.Fatalf("promotions = %d, want 1", got)
+	}
+}
+
+func TestCycleSkipsWhenAlreadyAtTarget(t *testing.T) {
+	m, fr, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 2
+		c.Cycle.ReadyMin = 1
+	})
+	setActive(t, m, testLink("current"), 29200)
+	setReady(m, testReady("ready-one", 3), testReady("ready-two", 2))
+	store.Merge([]contract.Link{testLink("pending")})
+
+	if err := m.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	if tests, _, _ := fr.counts(); tests != 0 {
+		t.Fatalf("tests = %d, want 0 when active + target are already present", tests)
+	}
+}
+
 func TestCycleSkipsFailedEntryDuringCooldown(t *testing.T) {
 	m, fr, store := testManager(t, func(c *config.Config) {
 		c.Cycle.FailedRetry = time.Hour

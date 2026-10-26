@@ -57,9 +57,9 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	if target < 1 {
 		target = 1
 	}
-	fetchTimeout := cfg.Test.HTTPTimeout
+	fetchTimeout := cfg.Cycle.FetchTimeout
 	if fetchTimeout <= 0 {
-		fetchTimeout = 10 * time.Second
+		fetchTimeout = 20 * time.Second
 	}
 
 	var cycleErr error
@@ -81,19 +81,47 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		return cycleErr
 	}
 
+	// A restart can restore ready standbys but fail to restore the persisted
+	// active. Promote the best ready candidate before spending time fetching
+	// and testing new sources, otherwise a ready WAN sits idle while the
+	// proxy fails closed.
+	if !m.hasActive() && m.readyCount() > 0 {
+		if err := m.Replace(cycleCtx); err != nil && cycleCtx.Err() == nil {
+			m.logger.Warn("wan: cycle could not promote an existing ready link", "err", err)
+		}
+	}
+
 	links, sourceErrs, fetchErr := catalog.LoadSources(cycleCtx, cfg.Paths.URLsFile, fetchTimeout)
 	if fetchErr != nil {
 		// Missing/unreadable source file: keep serving and keep ready.
 		cycleErr = fmt.Errorf("wan: cycle: load sources: %w", fetchErr)
 		m.logger.Warn("wan: cycle source fetch failed; keeping last-known-good", "err", fetchErr)
 	} else if len(sourceErrs) > 0 {
-		for _, err := range sourceErrs {
+		// Large public subscriptions contain thousands of unsupported or
+		// malformed lines. Log a bounded sample instead of one warning per
+		// line on every cycle.
+		const maxLoggedSourceErrors = 20
+		limit := len(sourceErrs)
+		if limit > maxLoggedSourceErrors {
+			limit = maxLoggedSourceErrors
+		}
+		for _, err := range sourceErrs[:limit] {
 			m.logger.Warn("wan: cycle source failed", "err", err)
+		}
+		if suppressed := len(sourceErrs) - limit; suppressed > 0 {
+			m.logger.Warn("wan: cycle source errors suppressed", "suppressed", suppressed)
 		}
 	}
 	if len(links) > 0 {
 		added := m.catalog.Merge(links)
 		m.logger.Info("wan: cycle merged sources", "links", len(links), "added", added)
+	}
+
+	if m.hasActive() && m.readyCount() >= target {
+		// Nothing to fill. Avoid launching a wave of tests that would only be
+		// discarded when the coordinator notices the target is already met.
+		m.logger.Info("wan: cycle already at ready target", "ready", m.readyCount(), "target", target)
+		return nil
 	}
 
 	// Build one finite queue for this cycle. Failed entries inside the retry

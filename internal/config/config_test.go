@@ -35,6 +35,7 @@ func TestDefaults(t *testing.T) {
 		{"state file", cfg.Paths.StateFile, "./var/state.json"},
 		{"log dir", cfg.Paths.LogDir, "./var/log"},
 		{"cycle interval", cfg.Cycle.Interval, 1800 * time.Second},
+		{"fetch timeout", cfg.Cycle.FetchTimeout, 20 * time.Second},
 		{"active liveness", cfg.Cycle.ActiveLiveness, 15 * time.Second},
 		{"probe count", cfg.Cycle.ProbeCount, 3},
 		{"probe window", cfg.Cycle.ProbeWindow, 8 * time.Second},
@@ -73,6 +74,7 @@ xray_bin = /opt/xray
 
 [cycle]
 interval = 60s
+fetch_timeout = 25s
 ready_target = 4
 failed_retry = 45m
 
@@ -104,6 +106,9 @@ access = false
 	}
 	if cfg.Cycle.FailedRetry != 45*time.Minute {
 		t.Errorf("failed retry = %v", cfg.Cycle.FailedRetry)
+	}
+	if cfg.Cycle.FetchTimeout != 25*time.Second {
+		t.Errorf("fetch timeout = %v", cfg.Cycle.FetchTimeout)
 	}
 	if got := len(cfg.URLs.Content); got != 2 {
 		t.Errorf("content urls = %d, want 2", got)

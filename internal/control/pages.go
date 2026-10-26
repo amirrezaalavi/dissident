@@ -213,6 +213,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			Title: "Cycle",
 			Rows: []kv{
 				{"cycle.interval", durationText(cfg.Cycle.Interval)},
+				{"cycle.fetch_timeout", durationText(cfg.Cycle.FetchTimeout)},
 				{"cycle.active_liveness", durationText(cfg.Cycle.ActiveLiveness)},
 				{"cycle.active_idle", durationText(cfg.Cycle.ActiveIdle)},
 				{"cycle.ready_liveness", durationText(cfg.Cycle.ReadyLiveness)},

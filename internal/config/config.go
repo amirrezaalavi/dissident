@@ -32,6 +32,7 @@ type PathsConfig struct {
 // CycleConfig controls catalog/qualification cadence and readiness targets.
 type CycleConfig struct {
 	Interval          time.Duration
+	FetchTimeout      time.Duration
 	ActiveLiveness    time.Duration
 	ActiveIdle        time.Duration
 	ReadyLiveness     time.Duration
@@ -107,6 +108,7 @@ func Defaults() Config {
 		},
 		Cycle: CycleConfig{
 			Interval:          1800 * time.Second,
+			FetchTimeout:      20 * time.Second,
 			ActiveLiveness:    15 * time.Second,
 			ActiveIdle:        60 * time.Second,
 			ReadyLiveness:     100 * time.Second,

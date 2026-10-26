@@ -122,6 +122,8 @@ func (c *Config) set(key, value string) error {
 
 	case "cycle.interval":
 		return setDuration(&c.Cycle.Interval, value)
+	case "cycle.fetch_timeout":
+		return setDuration(&c.Cycle.FetchTimeout, value)
 	case "cycle.active_liveness":
 		return setDuration(&c.Cycle.ActiveLiveness, value)
 	case "cycle.active_idle":

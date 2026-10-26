@@ -43,6 +43,9 @@ func (c Config) Validate() error {
 	if c.Cycle.Interval <= 0 {
 		add("cycle.interval must be greater than zero")
 	}
+	if c.Cycle.FetchTimeout <= 0 {
+		add("cycle.fetch_timeout must be greater than zero")
+	}
 	if c.Cycle.ActiveLiveness <= 0 {
 		add("cycle.active_liveness must be greater than zero")
 	}

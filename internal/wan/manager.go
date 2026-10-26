@@ -130,7 +130,7 @@ type Manager struct {
 	lastError     string
 	cancelRequest bool
 	failures      map[string][]time.Time
-	probeFails    []time.Time
+	probeFails    int
 	cycleCancel   context.CancelFunc
 	launchCtx     context.Context
 	cancel        context.CancelFunc
@@ -397,7 +397,7 @@ func (m *Manager) restoreActive(ctx context.Context, pa contract.Active) error {
 		return errStopped
 	}
 	m.active = &activeWAN{meta: meta, proc: p, routeID: routeIDFor(pa.Link.Hash, p.PID())}
-	m.probeFails = nil
+	m.probeFails = 0
 	m.failures = make(map[string][]time.Time)
 	m.mu.Unlock()
 	_ = m.saveState()
@@ -811,7 +811,9 @@ func (m *Manager) livenessLoop(ctx context.Context) {
 }
 
 // probeOnce runs at most one active liveness probe, respecting the global
-// per-minute budget. Three failures inside probe_window schedule a replacement.
+// per-minute budget. Three consecutive failures schedule a replacement; a
+// success resets the counter. Counting consecutive probes avoids a window
+// shorter than the probe interval, which could never reach the threshold.
 func (m *Manager) probeOnce(ctx context.Context) {
 	cfg := m.currentConfig()
 	now := m.now()
@@ -827,10 +829,6 @@ func (m *Manager) probeOnce(ctx context.Context) {
 		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(a.proc.Port()))
 	}
 	routeID := a.routeID
-	window := cfg.Cycle.ProbeWindow
-	if window <= 0 {
-		window = 8 * time.Second
-	}
 	if !m.takeProbeTokenLocked(now, cfg.Cycle.ProbeBudgetPerMin) {
 		m.mu.Unlock()
 		return
@@ -854,26 +852,23 @@ func (m *Manager) probeOnce(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		times := append(m.probeFails, now)
-		cut := now.Add(-window)
-		trimmed := times[:0]
-		for _, t := range times {
-			if !t.Before(cut) {
-				trimmed = append(trimmed, t)
-			}
+		m.probeFails++
+		threshold := cfg.Cycle.ProbeCount
+		if threshold < 1 {
+			threshold = 3
 		}
-		m.probeFails = trimmed
-		if len(trimmed) < 3 {
+		failures := m.probeFails
+		if failures < threshold {
 			m.mu.Unlock()
-			m.logger.Debug("wan: liveness probe failed", "route", routeID, "err", err, "failures", len(trimmed))
+			m.logger.Debug("wan: liveness probe failed", "route", routeID, "err", err, "failures", failures)
 			return
 		}
 		m.mu.Unlock()
-		m.logger.Warn("wan: active liveness failed; replacing", "route", routeID, "failures", 3, "err", err)
+		m.logger.Warn("wan: active liveness failed; replacing", "route", routeID, "failures", failures, "err", err)
 		m.triggerReplace("liveness")
 		return
 	}
-	m.probeFails = nil
+	m.probeFails = 0
 	m.mu.Unlock()
 }
 

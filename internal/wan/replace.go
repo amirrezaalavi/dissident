@@ -128,7 +128,7 @@ func (m *Manager) installActive(cand contract.Ready, p process) error {
 	old := m.active
 	m.active = &activeWAN{meta: meta, proc: p, routeID: routeIDFor(cand.Link.Hash, p.PID())}
 	m.removeReadyLocked(cand.Link.Hash)
-	m.probeFails = nil
+	m.probeFails = 0
 	m.failures = make(map[string][]time.Time)
 	m.mu.Unlock()
 
