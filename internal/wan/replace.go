@@ -37,7 +37,9 @@ func (m *Manager) Replace(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 	if len(candidates) == 0 {
-		m.triggerCycle("replace: no ready candidate")
+		if !m.Cycling() {
+			m.triggerCycle("replace: no ready candidate")
+		}
 		return errors.New("wan: replace: no ready candidate")
 	}
 	sortReady(candidates)
@@ -97,7 +99,9 @@ func (m *Manager) Replace(ctx context.Context) error {
 		return nil
 	}
 
-	m.triggerCycle("replace: no candidate promoted")
+	if !m.Cycling() {
+		m.triggerCycle("replace: no candidate promoted")
+	}
 	if lastErr == nil {
 		lastErr = errors.New("no ready candidate could be promoted")
 	}
@@ -129,6 +133,7 @@ func (m *Manager) installActive(cand contract.Ready, p process) error {
 	m.active = &activeWAN{meta: meta, proc: p, routeID: routeIDFor(cand.Link.Hash, p.PID())}
 	m.removeReadyLocked(cand.Link.Hash)
 	m.probeFails = 0
+	m.nextReplaceAt = time.Time{}
 	m.failures = make(map[string][]time.Time)
 	m.mu.Unlock()
 

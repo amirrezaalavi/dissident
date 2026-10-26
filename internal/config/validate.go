@@ -146,6 +146,12 @@ func (c Config) Validate() error {
 	if err := validateOptionalURL("urls.speed_fallback", c.URLs.SpeedFallback); err != nil {
 		add("%v", err)
 	}
+	if err := validateOptionalURL("urls.upload", c.URLs.Upload); err != nil {
+		add("%v", err)
+	}
+	if err := validateOptionalURL("urls.http2", c.URLs.HTTP2); err != nil {
+		add("%v", err)
+	}
 	if err := validateOptionalURL("urls.exit_ip", c.URLs.ExitIP); err != nil {
 		add("%v", err)
 	}

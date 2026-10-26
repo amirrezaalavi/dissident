@@ -58,6 +58,32 @@ func TestProbeSuccessResetsFailureWindow(t *testing.T) {
 	}
 }
 
+func TestProbeFailureReplacementCooldown(t *testing.T) {
+	m, fr, _ := testManager(t, func(c *config.Config) {
+		c.Cycle.ActiveLiveness = 10 * time.Millisecond
+		c.Cycle.ProbeBudgetPerMin = 30
+		c.Cycle.ProbeCount = 1
+	})
+	setActive(t, m, testLink("old-active"), 31003)
+	setReady(m, testReady("probe-candidate", 9))
+	fr.setProbeFn(func(ctx context.Context, addr string) error { return errTest })
+	m.mu.Lock()
+	m.nextReplaceAt = time.Now().Add(time.Hour)
+	m.mu.Unlock()
+
+	m.probeOnce(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	if got := len(fr.promotionLinks()); got != 0 {
+		t.Fatalf("cooldown did not suppress replacement; promotions = %d", got)
+	}
+	m.mu.Lock()
+	failures := m.probeFails
+	m.mu.Unlock()
+	if failures != 0 {
+		t.Fatalf("probeFails = %d after cooldown, want 0", failures)
+	}
+}
+
 func TestProbeBudgetIsGlobal(t *testing.T) {
 	m, fr, _ := testManager(t, func(c *config.Config) {
 		c.Cycle.ActiveLiveness = 10 * time.Millisecond

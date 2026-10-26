@@ -81,6 +81,8 @@ type URLsConfig struct {
 	Content       []string
 	Speed         string
 	SpeedFallback string
+	Upload        string
+	HTTP2         string
 	ExitIP        string
 }
 
@@ -132,8 +134,8 @@ func Defaults() Config {
 			ProtocolTimeout: 3 * time.Second,
 			XrayTimeout:     10 * time.Second,
 			HTTPTimeout:     5 * time.Second,
-			SpeedSize:       4000000,
-			MinSpeedMbps:    5,
+			SpeedSize:       1000000,
+			MinSpeedMbps:    1,
 			MaxTTFBMs:       2500,
 			StabilityPasses: 2,
 			ContentQuorum:   3,
@@ -156,6 +158,8 @@ func Defaults() Config {
 			},
 			Speed:         "https://proof.ovh.net/files/10Mb.dat",
 			SpeedFallback: "https://speed.cloudflare.com/__down?bytes=",
+			Upload:        "https://www.google.com/",
+			HTTP2:         "https://www.youtube.com/",
 			ExitIP:        "https://api.ipify.org/",
 		},
 		Log: LogConfig{

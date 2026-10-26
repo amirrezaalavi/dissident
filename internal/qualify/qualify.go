@@ -330,6 +330,17 @@ func (t *Tester) Test(ctx context.Context, link contract.Link) contract.Result {
 		return *speedFailure
 	}
 
+	// 8b. Upload path. GET probes and downloads can pass while the
+	// client-to-server direction is dead; HTTP/2 browsers then stall at the
+	// initial 64 KiB window and POST requests never complete. Run this after
+	// speed so a failing WAN still reports its measured throughput.
+	if err := t.Upload(ctx, socksAddr); err != nil {
+		return fail(contract.StageReal, "upload: %s", detailOf(err))
+	}
+	if err := t.HTTP2(ctx, socksAddr); err != nil {
+		return fail(contract.StageReal, "http2: %s", detailOf(err))
+	}
+
 	// 9. Stability: StabilityPasses-1 additional verify successes.
 	extra := t.test.StabilityPasses - 1
 	for pass := 0; pass < extra; pass++ {
@@ -410,6 +421,13 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 	result.TTFB = verified.TTFB
 	result.HTTPStatus = verified.Status
 	result.Bytes = verified.Bytes
+
+	if err := t.Upload(ctx, socksAddr); err != nil {
+		return fail(contract.StageReal, "upload: %s", detailOf(err))
+	}
+	if err := t.HTTP2(ctx, socksAddr); err != nil {
+		return fail(contract.StageReal, "http2: %s", detailOf(err))
+	}
 
 	measuredStage := contract.StageReal
 	if t.test.MinSpeedMbps > 0 || t.test.MaxTTFBMs > 0 {

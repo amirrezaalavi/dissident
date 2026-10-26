@@ -307,6 +307,36 @@ func TestVerifyAndProbeWithSOCKS(t *testing.T) {
 	}
 }
 
+func TestUploadWithSOCKS(t *testing.T) {
+	server := startTestHTTP(t)
+	socksAddr := startTestSOCKS(t)
+
+	t.Run("accepted response", func(t *testing.T) {
+		tester := New(testOptions(config.URLsConfig{Upload: server.URL + "/generate_204"}))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tester.Upload(ctx, socksAddr); err != nil {
+			t.Fatalf("Upload: %v", err)
+		}
+	})
+
+	t.Run("server error", func(t *testing.T) {
+		tester := New(testOptions(config.URLsConfig{Upload: server.URL + "/fail"}))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tester.Upload(ctx, socksAddr); err == nil {
+			t.Fatal("expected Upload failure")
+		}
+	})
+
+	t.Run("unset URL is a no-op", func(t *testing.T) {
+		tester := New(testOptions(config.URLsConfig{}))
+		if err := tester.Upload(context.Background(), socksAddr); err != nil {
+			t.Fatalf("Upload without URL: %v", err)
+		}
+	})
+}
+
 // acceptCloser runs a listener that accepts and closes connections so TCP
 // stages pass without a real service behind them.
 func acceptCloser(t *testing.T) (string, int) {

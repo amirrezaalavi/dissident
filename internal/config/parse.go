@@ -189,6 +189,10 @@ func (c *Config) set(key, value string) error {
 		c.URLs.Speed = value
 	case "urls.speed_fallback":
 		c.URLs.SpeedFallback = value
+	case "urls.upload":
+		c.URLs.Upload = value
+	case "urls.http2":
+		c.URLs.HTTP2 = value
 	case "urls.exit_ip":
 		c.URLs.ExitIP = value
 

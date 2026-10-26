@@ -35,6 +35,15 @@ const (
 	socksDialTimeout = 10 * time.Second
 	// routeIDLength is the length of the short hash exposed as a route ID.
 	routeIDLength = 12
+	// replaceCooldown prevents a dead active WAN with no ready candidate from
+	// scheduling a replacement on every liveness tick (and spamming the log).
+	replaceCooldown = 5 * time.Minute
+	// speedLivenessInterval is how often the active route is checked for the
+	// configured minimum download rate. Small GET probes do not detect a WAN
+	// that has collapsed from 4 Mbps to 0.6 Mbps.
+	speedLivenessInterval = 5 * time.Minute
+	// speedLivenessTimeout bounds the 1 MB speed probe.
+	speedLivenessTimeout = 30 * time.Second
 )
 
 var (
@@ -131,6 +140,7 @@ type Manager struct {
 	cancelRequest bool
 	failures      map[string][]time.Time
 	probeFails    int
+	nextReplaceAt time.Time
 	cycleCancel   context.CancelFunc
 	launchCtx     context.Context
 	cancel        context.CancelFunc
@@ -347,11 +357,12 @@ func (m *Manager) Start(ctx context.Context) error {
 		cancel()
 		return errStopped
 	}
-	m.loopsWG.Add(3)
+	m.loopsWG.Add(4)
 	m.mu.Unlock()
 	go m.cycleLoop(base)
 	go m.livenessLoop(base)
 	go m.readyLivenessLoop(base)
+	go m.speedLivenessLoop(base)
 
 	if !m.hasActive() {
 		m.triggerCycle("startup: no active WAN")
@@ -398,6 +409,7 @@ func (m *Manager) restoreActive(ctx context.Context, pa contract.Active) error {
 	}
 	m.active = &activeWAN{meta: meta, proc: p, routeID: routeIDFor(pa.Link.Hash, p.PID())}
 	m.probeFails = 0
+	m.nextReplaceAt = time.Time{}
 	m.failures = make(map[string][]time.Time)
 	m.mu.Unlock()
 	_ = m.saveState()
@@ -447,6 +459,21 @@ func (m *Manager) promotedOrVerified(ctx context.Context, link contract.Link, ti
 	}
 	if p == nil {
 		return nil, errors.New("wan: verification fallback returned no process")
+	}
+	if m.tester != nil && p.Port() > 0 {
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(p.Port()))
+		if err := m.tester.Upload(ctx, addr); err != nil {
+			stopCtx, stopCancel := boundedContext(context.Background(), defaultStopTimeout)
+			_ = m.stopProcess(stopCtx, p)
+			stopCancel()
+			return nil, fmt.Errorf("wan: verification upload failed: %w", err)
+		}
+		if err := m.tester.HTTP2(ctx, addr); err != nil {
+			stopCtx, stopCancel := boundedContext(context.Background(), defaultStopTimeout)
+			_ = m.stopProcess(stopCtx, p)
+			stopCancel()
+			return nil, fmt.Errorf("wan: verification HTTP/2 failed: %w", err)
+		}
 	}
 	m.logger.Info("wan: candidate started via verification-only fallback",
 		"hash", link.Hash, "port", p.Port())
@@ -810,6 +837,71 @@ func (m *Manager) livenessLoop(ctx context.Context) {
 	}
 }
 
+func (m *Manager) speedLivenessLoop(ctx context.Context) {
+	defer m.loopsWG.Done()
+	ticker := time.NewTicker(speedLivenessInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.speedProbeOnce(ctx)
+		}
+	}
+}
+
+// speedProbeOnce verifies that the active route still meets the configured
+// minimum download rate. A WAN that passes the small liveness GET but has
+// collapsed to sub-1 Mbps is not useful for browsing and must be replaced.
+func (m *Manager) speedProbeOnce(ctx context.Context) {
+	if m.tester == nil {
+		return
+	}
+	cfg := m.currentConfig()
+	minimum := cfg.Test.MinSpeedMbps
+	if minimum <= 0 {
+		return
+	}
+	now := m.now()
+
+	m.mu.Lock()
+	a := m.active
+	if a == nil || a.proc == nil || now.Before(m.nextReplaceAt) {
+		m.mu.Unlock()
+		return
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(a.meta.LocalPort))
+	if a.meta.LocalPort <= 0 {
+		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(a.proc.Port()))
+	}
+	routeID := a.routeID
+	m.nextReplaceAt = now.Add(replaceCooldown)
+	m.mu.Unlock()
+
+	pctx, cancel := context.WithTimeout(ctx, speedLivenessTimeout)
+	speed, _, err := m.tester.Speed(pctx, addr)
+	cancel()
+	if ctx.Err() != nil {
+		return
+	}
+
+	m.mu.Lock()
+	if m.active == nil || m.active.routeID != routeID {
+		m.mu.Unlock()
+		return
+	}
+	if err == nil && speed >= minimum {
+		m.nextReplaceAt = time.Time{}
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+	m.logger.Warn("wan: active speed below minimum; replacing",
+		"route", routeID, "mbps", speed, "minimum", minimum, "err", err)
+	m.triggerReplace("speed liveness")
+}
+
 // probeOnce runs at most one active liveness probe, respecting the global
 // per-minute budget. Three consecutive failures schedule a replacement; a
 // success resets the counter. Counting consecutive probes avoids a window
@@ -863,12 +955,20 @@ func (m *Manager) probeOnce(ctx context.Context) {
 			m.logger.Debug("wan: liveness probe failed", "route", routeID, "err", err, "failures", failures)
 			return
 		}
+		m.probeFails = 0
+		if now.Before(m.nextReplaceAt) {
+			m.mu.Unlock()
+			m.logger.Debug("wan: liveness replacement cooling down", "route", routeID, "next", m.nextReplaceAt)
+			return
+		}
+		m.nextReplaceAt = now.Add(replaceCooldown)
 		m.mu.Unlock()
 		m.logger.Warn("wan: active liveness failed; replacing", "route", routeID, "failures", failures, "err", err)
 		m.triggerReplace("liveness")
 		return
 	}
 	m.probeFails = 0
+	m.nextReplaceAt = time.Time{}
 	m.mu.Unlock()
 }
 
