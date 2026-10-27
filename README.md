@@ -28,6 +28,18 @@ curl -x http://127.0.0.1:10909 https://www.gstatic.com/generate_204
 curl --socks5-hostname 127.0.0.1:10909 https://www.cloudflare.com/cdn-cgi/trace
 ```
 
+## Releases
+
+Tags matching `v*` build linux/amd64 and linux/arm64 assets for `dissident`,
+`viberayd`, `viberoxy`, and `viber-console` through
+`.github/workflows/release.yml`. Build the same set locally with:
+
+```sh
+make release VERSION=v0.1.0
+```
+
+The assets and `SHA256SUMS` are written to `dist/`.
+
 Stop with Ctrl-C or SIGTERM. SIGHUP reloads the configuration. The accepted live
 fields are `log.level`, `cycle.*`, and `swap.*`; listener, qualification, URL,
 path, and log-file changes are rejected with a restart-required error so a
@@ -43,8 +55,8 @@ half-applied config can never run.
   → real HTTP → content quorum → speed/TTFB → stability. A config that fails a
   stage never reaches the next one. The real xray is started once per candidate
   and stopped on every path. Cheap stages run in `test.cheap_workers` parallel
-  workers; deep tests are bounded by `test.real_workers`; the 4 MB speed
-  transfer is serialized.
+  workers; deep tests are bounded by `test.real_workers`; the 1 MB download,
+  32 KiB upload, and 128 KiB HTTP/2 gates are serialized.
 - **WAN runtime**: exactly one active xray client, a persisted ready list, 15s
   liveness (3 probes / 8s), passive-failure burst, and make-before-break
   replacement with a drain window. The only manual WAN actions are **Replace**

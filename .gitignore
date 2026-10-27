@@ -2,6 +2,7 @@
 .cache/
 .tmp/
 bin/
+dist/
 *.test
 
 # Dissident runtime state, logs, and downloaded artifacts
