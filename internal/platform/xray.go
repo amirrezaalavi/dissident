@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -175,9 +174,9 @@ func (x *Xray) PID() int {
 	return x.pid
 }
 
-// Stop terminates the child with SIGTERM, waits up to five seconds, then
-// sends SIGKILL, reaps it, and removes the config file. Stop is idempotent and
-// safe on a nil Xray.
+// Stop terminates the child gracefully on Unix (SIGTERM, then SIGKILL after
+// five seconds), or immediately with Kill on Windows, reaps it, and removes
+// the config file. Stop is idempotent and safe on a nil Xray.
 func (x *Xray) Stop(ctx context.Context) error {
 	if x == nil {
 		return nil
@@ -197,7 +196,7 @@ func (x *Xray) stop(ctx context.Context) error {
 		return nil
 	}
 	if x.cmd.Process != nil {
-		_ = x.cmd.Process.Signal(syscall.SIGTERM)
+		_ = terminateProcess(x.cmd.Process)
 	}
 	if x.waitDone(stopGrace, ctx) {
 		return nil

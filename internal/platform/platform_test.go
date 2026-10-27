@@ -13,9 +13,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -77,6 +77,9 @@ func shellQuote(value string) string {
 
 func fakeXrayScript(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake xray uses a POSIX shell wrapper")
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
@@ -633,7 +636,7 @@ func TestStartXrayUsesConfigPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config file: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("config mode = %o, want 600", info.Mode().Perm())
 	}
 
@@ -745,7 +748,11 @@ func TestStartXrayProcessDeath(t *testing.T) {
 	if pid <= 0 {
 		t.Fatal("missing pid")
 	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatalf("find process: %v", err)
+	}
+	if err := proc.Kill(); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 	select {
@@ -765,6 +772,9 @@ func TestStartXrayProcessDeath(t *testing.T) {
 }
 
 func TestStartXrayContextExpiryKillsChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper is a POSIX shell script")
+	}
 	dir := t.TempDir()
 	script := filepath.Join(dir, "hang.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o700); err != nil {

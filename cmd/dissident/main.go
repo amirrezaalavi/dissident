@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"dissident/internal/app"
@@ -82,27 +83,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
+	// SIGHUP reload is Unix-only: Windows has no HUP delivery to a console
+	// process. Windows operators restart the service to apply the same fields.
+	if runtime.GOOS != "windows" {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		defer signal.Stop(hup)
 
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-hup:
-				if ctx.Err() != nil {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case <-hup:
+					if ctx.Err() != nil {
+						return
+					}
+					if err := application.ReloadConfig(); err != nil {
+						application.Logger().Error("config reload rejected; keeping previous snapshot", "err", err)
+						continue
+					}
+					application.Logger().Info("config reloaded via SIGHUP")
 				}
-				if err := application.ReloadConfig(); err != nil {
-					application.Logger().Error("config reload rejected; keeping previous snapshot", "err", err)
-					continue
-				}
-				application.Logger().Info("config reloaded via SIGHUP")
 			}
-		}
-	}()
+		}()
+	}
 
 	if err := application.Run(ctx); err != nil {
 		fmt.Fprintf(stderr, "dissident: %v\n", err)

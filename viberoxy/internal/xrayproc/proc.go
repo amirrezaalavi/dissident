@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -170,10 +171,11 @@ func (h *Handle) ExitReason() error {
 	return h.exitErr
 }
 
-// Stop terminates the process: SIGTERM, then SIGKILL if it is still alive
-// after the grace period, then removal of the given temp config file (the
-// handle's own config file if configPath is empty). It is safe on a nil
-// handle and safe to call more than once; concurrent callers serialize.
+// Stop terminates the process: SIGTERM on Unix, Kill on Windows, then Kill
+// if it is still alive after the grace period, then removal of the given temp
+// config file (the handle's own config file if configPath is empty). It is
+// safe on a nil handle and safe to call more than once; concurrent callers
+// serialize.
 func (h *Handle) Stop(configPath string) error {
 	if h == nil {
 		if configPath != "" {
@@ -208,12 +210,19 @@ func (h *Handle) Stop(configPath string) error {
 			go h.reap()
 		}
 
-		h.cmd.Process.Signal(syscall.SIGTERM)
+		if runtime.GOOS == "windows" {
+			// Windows has no SIGTERM delivery for an arbitrary child, and a
+			// console control event would also hit this process. Kill is the
+			// only reliable stop primitive there.
+			_ = h.cmd.Process.Kill()
+		} else {
+			_ = h.cmd.Process.Signal(syscall.SIGTERM)
+		}
 
 		select {
 		case <-h.Exited:
 		case <-time.After(grace):
-			h.cmd.Process.Kill()
+			_ = h.cmd.Process.Kill()
 			<-h.Exited
 		}
 	}

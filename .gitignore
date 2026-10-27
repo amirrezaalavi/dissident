@@ -4,6 +4,7 @@
 bin/
 dist/
 *.test
+*.exe
 
 # Dissident runtime state, logs, and downloaded artifacts
 var/

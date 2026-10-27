@@ -40,7 +40,31 @@ make release VERSION=v0.1.0
 
 The assets and `SHA256SUMS` are written to `dist/`.
 
-Stop with Ctrl-C or SIGTERM. SIGHUP reloads the configuration. The accepted live
+## Windows
+
+The service cross-compiles for Windows and runs as a console process:
+
+```powershell
+go build -trimpath -o dissident.exe ./cmd/dissident
+.\dissident.exe -version
+```
+
+- Put `xray.exe` on `PATH`, or set `paths.xray_bin = xray.exe` in the
+  config. The Windows default is `xray.exe`; Unix keeps
+  `/usr/local/bin/xray`.
+- The default state, log, and subscription paths are relative
+  (`./var`, `./configs`), so run the service from a writable directory.
+- SIGHUP reload is Unix-only. On Windows, restart the process to apply the
+  same configuration changes.
+- There is no built-in Windows service wrapper yet. Run it under Task
+  Scheduler, NSSM, or WinSW if it must survive logoff.
+- Panel and proxy listen on the same `0.0.0.0:8090` and `0.0.0.0:10909`;
+  add firewall rules for the interfaces you expose.
+
+CI builds every module on `windows-latest`, vets and tests the dissident
+package there, and smoke-tests the resulting `dissident.exe`.
+
+Stop with Ctrl-C or SIGTERM. On Unix, SIGHUP reloads the configuration. The accepted live
 fields are `log.level`, `cycle.*`, and `swap.*`; listener, qualification, URL,
 path, and log-file changes are rejected with a restart-required error so a
 half-applied config can never run.

@@ -2,7 +2,10 @@
 // defaults, validation rules, and the concurrency-safe runtime snapshot.
 package config
 
-import "time"
+import (
+	"runtime"
+	"time"
+)
 
 // Config is one complete, validated dissident configuration.
 type Config struct {
@@ -94,6 +97,16 @@ type LogConfig struct {
 	MaxSizeMB     int
 }
 
+// defaultXrayBin picks the conventional xray binary for the host. Windows
+// servers normally keep xray.exe next to dissident or on PATH; Unix installs
+// use the packaged /usr/local/bin/xray.
+func defaultXrayBin() string {
+	if runtime.GOOS == "windows" {
+		return "xray.exe"
+	}
+	return "/usr/local/bin/xray"
+}
+
 // Defaults returns the configuration used when a key is absent. The values
 // mirror the documented demo defaults in docs/DISSIDENT-IMPLEMENTATION.md.
 func Defaults() Config {
@@ -106,7 +119,7 @@ func Defaults() Config {
 			URLsFile:  "./configs/urls.txt",
 			StateFile: "./var/state.json",
 			LogDir:    "./var/log",
-			XrayBin:   "/usr/local/bin/xray",
+			XrayBin:   defaultXrayBin(),
 		},
 		Cycle: CycleConfig{
 			Interval:          1800 * time.Second,

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -182,7 +183,9 @@ func (s *Service) Restart(ctx context.Context) error {
 	return s.Start(ctx)
 }
 
-// Stop terminates the child (SIGTERM, then SIGKILL after a grace period).
+// Stop terminates the child (SIGINT on Unix, then Kill after a grace period).
+// Windows has no console SIGINT delivery to an arbitrary child, so it kills
+// immediately.
 func (s *Service) Stop() {
 	s.mu.Lock()
 	cmd := s.cmd
@@ -196,7 +199,11 @@ func (s *Service) Stop() {
 	}
 
 	pid := cmd.Process.Pid
-	_ = cmd.Process.Signal(os.Interrupt) // SIGINT → daemons exit cleanly
+	if runtime.GOOS == "windows" {
+		_ = cmd.Process.Kill()
+	} else {
+		_ = cmd.Process.Signal(os.Interrupt) // SIGINT → daemons exit cleanly
+	}
 	select {
 	case <-exitCh:
 	case <-time.After(5 * time.Second):

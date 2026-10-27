@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,11 @@ func TestDefaults(t *testing.T) {
 		t.Fatalf("default config must validate: %v", err)
 	}
 
+	wantXray := "/usr/local/bin/xray"
+	if runtime.GOOS == "windows" {
+		wantXray = "xray.exe"
+	}
+
 	checks := []struct {
 		name string
 		got  any
@@ -34,6 +40,7 @@ func TestDefaults(t *testing.T) {
 		{"urls file", cfg.Paths.URLsFile, "./configs/urls.txt"},
 		{"state file", cfg.Paths.StateFile, "./var/state.json"},
 		{"log dir", cfg.Paths.LogDir, "./var/log"},
+		{"xray bin", cfg.Paths.XrayBin, wantXray},
 		{"cycle interval", cfg.Cycle.Interval, 1800 * time.Second},
 		{"fetch timeout", cfg.Cycle.FetchTimeout, 20 * time.Second},
 		{"active liveness", cfg.Cycle.ActiveLiveness, 15 * time.Second},

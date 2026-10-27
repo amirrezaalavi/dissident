@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -41,12 +43,24 @@ func loadConfig() settings {
 		vxMetrics:    env("VIBEROXY_METRICS_URL", "http://127.0.0.1:9090"),
 		vxAPI:        env("VIBEROXY_API_URL", "http://127.0.0.1:1980"),
 		logLevel:     env("CONSOLE_LOG_LEVEL", "info"),
-		configDir:    env("VIBER_CONFIG_DIR", "/etc/viber"),
+		configDir:    env("VIBER_CONFIG_DIR", defaultConfigDir()),
 		viberaydBin:  env("VIBERAYD_BIN", "viberayd"),
 		viberoxyBin:  env("VIBEROXY_BIN", "viberoxy"),
 		token:        os.Getenv("CONSOLE_TOKEN"),
 	}
 	return cfg
+}
+
+// defaultConfigDir keeps the Unix /etc/viber convention, and uses the
+// machine-wide ProgramData directory on Windows servers.
+func defaultConfigDir() string {
+	if runtime.GOOS == "windows" {
+		if dir := os.Getenv("ProgramData"); dir != "" {
+			return filepath.Join(dir, "viber")
+		}
+		return "C:/ProgramData/viber"
+	}
+	return "/etc/viber"
 }
 
 func env(key, def string) string {

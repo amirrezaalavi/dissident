@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build, vet, and test
+        run: make check
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build all modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build ./...
+          (cd viberayd && go build ./...)
+          (cd viberoxy && go build ./...)
+          (cd viber-console && go build ./...)
+
+      - name: Vet dissident
+        run: go vet ./...
+
+      - name: Test dissident
+        run: go test -short ./... -count=1
+
+      - name: Smoke-test the Windows binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -trimpath -o dist/dissident.exe ./cmd/dissident
+          ./dist/dissident.exe -version

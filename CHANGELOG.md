@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Windows amd64/arm64 portability for the dissident service and all three
+  legacy modules. The service runs as a console process; see the README
+  Windows section for `xray.exe` and service-wrapper notes.
+- Windows CI on `windows-latest`: builds every module, vets the dissident
+  package, runs its unit tests, and smoke-tests `dissident.exe -version`.
+
+### Fixed
+
+- Windows process shutdown uses `Kill` instead of the unsupported
+  `SIGTERM`/`SIGINT` delivery, so WAN replacement and console restarts do
+  not wait out a five-second grace period.
+- The default xray binary is `xray.exe` on Windows and remains
+  `/usr/local/bin/xray` on Unix.
+- SIGHUP reload is registered only on Unix; Windows avoids an unsupported
+  signal registration.
+- Windows tests skip POSIX-shell xray fakes and Unix file-mode assertions
+  instead of failing.
+
 ## v0.1.0 — 2026-10-27
 
 First unified release of the `dissident` monorepo. The repository brings the
