@@ -48,17 +48,21 @@ DIST := dist
 
 release:
 	@rm -rf $(DIST) && mkdir -p $(DIST)
-	@for arch in amd64 arm64; do \
-		echo "== linux/$$arch"; \
-		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath \
-			-ldflags "-s -w -X main.version=$(VERSION)" \
-			-o $(DIST)/dissident-linux-$$arch ./cmd/dissident || exit 1; \
-		(cd viberayd && CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath \
-			-ldflags "-s -w" -o ../$(DIST)/viberayd-linux-$$arch ./cmd/viberayd) || exit 1; \
-		(cd viberoxy && CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath \
-			-ldflags "-s -w" -o ../$(DIST)/viberoxy-linux-$$arch .) || exit 1; \
-		(cd viber-console && CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath \
-			-ldflags "-s -w" -o ../$(DIST)/viber-console-linux-$$arch ./cmd/console) || exit 1; \
+	@for os in linux windows; do \
+		for arch in amd64 arm64; do \
+			ext=; \
+			if [ "$$os" = windows ]; then ext=.exe; fi; \
+			echo "== $$os/$$arch"; \
+			CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath \
+				-ldflags "-s -w -X main.version=$(VERSION)" \
+				-o $(DIST)/dissident-$$os-$$arch$$ext ./cmd/dissident || exit 1; \
+			(cd viberayd && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath \
+				-ldflags "-s -w" -o ../$(DIST)/viberayd-$$os-$$arch$$ext ./cmd/viberayd) || exit 1; \
+			(cd viberoxy && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath \
+				-ldflags "-s -w" -o ../$(DIST)/viberoxy-$$os-$$arch$$ext .) || exit 1; \
+			(cd viber-console && CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath \
+				-ldflags "-s -w" -o ../$(DIST)/viber-console-$$os-$$arch$$ext ./cmd/console) || exit 1; \
+		done; \
 	done
 	@cd $(DIST) && sha256sum * > SHA256SUMS
 	@ls -lh $(DIST)

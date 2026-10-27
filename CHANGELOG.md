@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.1.1 — 2026-10-27
 
 ### Added
 
 - Windows amd64/arm64 portability for the dissident service and all three
   legacy modules. The service runs as a console process; see the README
   Windows section for `xray.exe` and service-wrapper notes.
+- Windows amd64/arm64 binaries in the release asset set.
 - Windows CI on `windows-latest`: builds every module, vets the dissident
   package, runs its unit tests, and smoke-tests `dissident.exe -version`.
 

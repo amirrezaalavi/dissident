@@ -30,8 +30,8 @@ curl --socks5-hostname 127.0.0.1:10909 https://www.cloudflare.com/cdn-cgi/trace
 
 ## Releases
 
-Tags matching `v*` build linux/amd64 and linux/arm64 assets for `dissident`,
-`viberayd`, `viberoxy`, and `viber-console` through
+Tags matching `v*` build linux and Windows amd64/arm64 assets for
+`dissident`, `viberayd`, `viberoxy`, and `viber-console` through
 `.github/workflows/release.yml`. Build the same set locally with:
 
 ```sh
