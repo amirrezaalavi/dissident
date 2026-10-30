@@ -3,6 +3,8 @@ package qualify
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -627,5 +630,148 @@ func TestPromoteTrustedRealXray(t *testing.T) {
 	_, process, err := failing.PromoteTrusted(ctx, socksLink(t, socksAddr))
 	if err == nil || process != nil {
 		t.Fatalf("expected failed trusted promotion, got process=%v err=%v", process, err)
+	}
+}
+
+func TestVerifyTrustedRetriesTransientFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"i/o timeout", errors.New("read tcp 127.0.0.1:1: i/o timeout"), true},
+		{"unexpected EOF", errors.New("unexpected EOF"), true},
+		{"connection reset", errors.New("connection reset by peer"), true},
+		{"tls handshake timeout", errors.New("net/http: TLS handshake timeout"), true},
+		{"context deadline", context.DeadlineExceeded, true},
+		{"wrapped reset", fmt.Errorf("verify: %w", syscall.ECONNRESET), true},
+		{"context canceled", context.Canceled, false},
+		{"http 500", errors.New("https://verify.example: HTTP 500"), false},
+	} {
+		if got := isTransientVerifyError(tc.err); got != tc.want {
+			t.Errorf("%s: transient = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	t.Run("recovers", func(t *testing.T) {
+		tester := New(Options{})
+		calls := 0
+		tester.trustedVerify = func(context.Context, string) error {
+			calls++
+			if calls < trustedVerifyAttempts {
+				return errors.New("read tcp 127.0.0.1:1: i/o timeout")
+			}
+			return nil
+		}
+		start := time.Now()
+		if _, err := tester.verifyTrusted(context.Background(), "hash", "127.0.0.1:1"); err != nil {
+			t.Fatalf("verifyTrusted: %v", err)
+		}
+		if calls != trustedVerifyAttempts {
+			t.Fatalf("attempts = %d, want %d", calls, trustedVerifyAttempts)
+		}
+		if elapsed := time.Since(start); elapsed < 2*trustedVerifyBackoff {
+			t.Fatalf("elapsed = %v, want at least two backoffs", elapsed)
+		}
+	})
+
+	t.Run("exhausted", func(t *testing.T) {
+		tester := New(Options{})
+		calls := 0
+		tester.trustedVerify = func(context.Context, string) error {
+			calls++
+			return errors.New("connection reset by peer")
+		}
+		if _, err := tester.verifyTrusted(context.Background(), "hash", "127.0.0.1:1"); err == nil {
+			t.Fatal("verifyTrusted should fail after the retry budget")
+		}
+		if calls != trustedVerifyAttempts {
+			t.Fatalf("attempts = %d, want %d", calls, trustedVerifyAttempts)
+		}
+	})
+
+	t.Run("permanent", func(t *testing.T) {
+		tester := New(Options{})
+		calls := 0
+		tester.trustedVerify = func(context.Context, string) error {
+			calls++
+			return errors.New("https://verify.example: HTTP 403")
+		}
+		if _, err := tester.verifyTrusted(context.Background(), "hash", "127.0.0.1:1"); err == nil {
+			t.Fatal("verifyTrusted should fail on a non-2xx response")
+		}
+		if calls != 1 {
+			t.Fatalf("attempts = %d, want 1 (permanent failure must not retry)", calls)
+		}
+	})
+}
+
+func TestPromoteTrustedRetriesTransientVerifyAndKeepsProcess(t *testing.T) {
+	if !realXrayAvailable() {
+		t.Skip("xray binary not installed")
+	}
+	server := startTestHTTP(t)
+	socksAddr := startTestSOCKS(t)
+	tester := New(fullPipelineOptions(server))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	calls := 0
+	var addrs []string
+	tester.trustedVerify = func(_ context.Context, addr string) error {
+		calls++
+		addrs = append(addrs, addr)
+		if calls < trustedVerifyAttempts {
+			return errors.New("read tcp: i/o timeout")
+		}
+		return nil
+	}
+
+	result, xray, err := tester.PromoteTrusted(ctx, socksLink(t, socksAddr))
+	if err != nil {
+		t.Fatalf("PromoteTrusted: %v", err)
+	}
+	if calls != trustedVerifyAttempts {
+		t.Fatalf("verify attempts = %d, want %d", calls, trustedVerifyAttempts)
+	}
+	for i := 1; i < len(addrs); i++ {
+		if addrs[i] != addrs[0] {
+			t.Fatalf("verify used different SOCKS ports after retry: %v", addrs)
+		}
+	}
+	if xray == nil || !xray.Alive() {
+		t.Fatal("PromoteTrusted did not keep the started process")
+	}
+	if !result.OK || result.Reason != "ok" {
+		t.Fatalf("result = %+v", result)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer stopCancel()
+	defer xray.Stop(stopCtx)
+}
+
+func TestPromoteTrustedDoesNotRetryStaticFailure(t *testing.T) {
+	tester := New(testOptions(config.URLsConfig{}))
+	calls := 0
+	tester.trustedVerify = func(context.Context, string) error {
+		calls++
+		return nil
+	}
+	link := contract.Link{
+		Protocol: contract.Protocol("not-a-protocol"),
+		Server:   "127.0.0.1",
+		Port:     1080,
+		Hash:     "static-failure",
+		Params:   map[string]string{},
+	}
+	result, xray, err := tester.PromoteTrusted(context.Background(), link)
+	if err == nil || xray != nil {
+		t.Fatalf("static failure = (%v, %v), want error and no process", xray, err)
+	}
+	if result.Stage != contract.StageParse {
+		t.Fatalf("stage = %q, want parse", result.Stage)
+	}
+	if calls != 0 {
+		t.Fatalf("verify calls = %d, want 0 for a static support failure", calls)
 	}
 }

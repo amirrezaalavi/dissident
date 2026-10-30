@@ -392,6 +392,10 @@ and returns the running process; on failure it stops the process and returns the
 `PromoteTrusted` is the lightweight path for a ready entry whose full Test pass is within
 the WAN promotion trust window: it renders, starts xray, and requires one 2xx verify,
 skipping upload/HTTP-2/speed/content/stability because the full Test already proved them.
+That verify is retried up to three total attempts with a 300 ms backoff on transient
+transport failures (timeout, EOF, reset, TLS handshake timeout, deadline), reusing the
+same started xray process. Non-2xx responses and static support/render/start failures are
+never retried.
 `Verify` and `Probe` follow redirects and require a 2xx. `Speed` reads exactly
 `test.speed_size` bytes, tries `urls.speed` then `urls.speed_fallback` on transport
 errors or non-2xx, and returns Mbps = bytes*8/elapsed/1e6.
