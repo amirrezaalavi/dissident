@@ -21,6 +21,10 @@ func Load(path string) (Config, error) {
 	if err := applyEntries(&cfg, entries); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
+	// Sanitize before validation: a URL with a pasted trailing backslash would
+	// otherwise parse as a valid URL with a bogus %5C path and survive the
+	// scheme/host checks, only to fail network verification later.
+	cfg.normalizeURLs()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}

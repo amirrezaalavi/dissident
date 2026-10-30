@@ -29,7 +29,12 @@ import (
 // read-only pages.
 type Data interface {
 	Snapshot() contract.Snapshot
-	Entries() []contract.Entry
+	// Recent returns at most limit catalog entries in /tests display order.
+	// Implementations must clone only the selected entries.
+	Recent(limit int) []contract.Entry
+	// RecentTested returns at most limit entries with test results, newest
+	// first. Implementations must clone only the selected entries.
+	RecentTested(limit int) []contract.Entry
 	Cycling() bool
 	LastCycle() time.Time
 	NextCycle() time.Time
@@ -304,11 +309,18 @@ func (s *Server) snapshot() contract.Snapshot {
 	return snap
 }
 
-func (s *Server) entries() []contract.Entry {
+func (s *Server) recent(limit int) []contract.Entry {
 	if s.opts.Data == nil {
 		return nil
 	}
-	return s.opts.Data.Entries()
+	return s.opts.Data.Recent(limit)
+}
+
+func (s *Server) recentTested(limit int) []contract.Entry {
+	if s.opts.Data == nil {
+		return nil
+	}
+	return s.opts.Data.RecentTested(limit)
 }
 
 func (s *Server) cycling() bool {

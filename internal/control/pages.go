@@ -48,7 +48,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		p.NextCycle = fmtTime(s.nextCycle())
 		p.LastError = sanitizeReason(s.lastError())
 		p.HasError = p.LastError != ""
-		p.Recent = recentRows(s.entries(), 10)
+		p.Recent = recentRows(s.recentTested(10), 10)
 	} else {
 		p.Notice = "No runtime data provider is attached; this page is in read-only Snapshot mode."
 		p.CycleState = "not available"
@@ -111,7 +111,7 @@ func (s *Server) handleTests(w http.ResponseWriter, r *http.Request) {
 		if s.cycling() {
 			p.CycleState = "running"
 		}
-		p.Rows = testRows(s.entries(), 200)
+		p.Rows = testRows(s.recent(200), 200)
 		p.LastCycle = fmtTime(s.lastCycle())
 		p.NextCycle = fmtTime(s.nextCycle())
 		p.LastError = sanitizeReason(s.lastError())

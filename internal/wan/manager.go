@@ -26,6 +26,21 @@ const (
 	// passiveFailureThreshold is the number of non-nil Report outcomes for the
 	// active route that triggers one asynchronous replacement.
 	passiveFailureThreshold = 3
+	// passiveGracePeriod is how long a newly installed active route is exempt
+	// from passive-failure replacement. Connections that were already in
+	// flight during a swap can fail for both the old and the new route; without
+	// the grace those stale failures immediately replaced the fresh route and
+	// produced a replacement storm. Active liveness probes are deliberately
+	// not exempt: a genuinely dead route is still replaced on the normal
+	// probe_count cadence.
+	passiveGracePeriod = 60 * time.Second
+	// passiveReplaceCooldown is the minimum spacing between two replacement
+	// triggers raised by Report. replaceScheduled only collapses bursts while
+	// one Replace is running; a replacement that fails quickly clears it and
+	// the next three failures used to start another attempt immediately. This
+	// cooldown survives a failed attempt, so a calm failure window can never
+	// turn into back-to-back replacement attempts.
+	passiveReplaceCooldown = 5 * time.Minute
 	// defaultProbeTimeout bounds one liveness probe when the configured
 	// liveness interval is unusable.
 	defaultProbeTimeout = 5 * time.Second
@@ -141,16 +156,22 @@ type Manager struct {
 	failures      map[string][]time.Time
 	probeFails    int
 	nextReplaceAt time.Time
-	cycleCancel   context.CancelFunc
-	launchCtx     context.Context
-	cancel        context.CancelFunc
-	started       bool
-	stopping      bool
-	stopped       bool
-	draining      map[int]process
-	nextDrainID   int
-	probeTokens   float64
-	probeTokensAt time.Time
+	// nextPassiveReplaceAt is the earliest time Report may trigger another
+	// replacement. It is pushed forward by passiveGracePeriod after a swap
+	// and by passiveCooldown when a passive trigger fires.
+	nextPassiveReplaceAt time.Time
+	passiveGrace         time.Duration
+	passiveCooldown      time.Duration
+	cycleCancel          context.CancelFunc
+	launchCtx            context.Context
+	cancel               context.CancelFunc
+	started              bool
+	stopping             bool
+	stopped              bool
+	draining             map[int]process
+	nextDrainID          int
+	probeTokens          float64
+	probeTokensAt        time.Time
 
 	cycling   atomic.Bool
 	replaceMu sync.Mutex
@@ -192,13 +213,15 @@ func New(opts Options) *Manager {
 		store = catalog.New()
 	}
 	m := &Manager{
-		catalog:   store,
-		tester:    opts.Tester,
-		config:    cfg,
-		logger:    logger,
-		stateFile: opts.StateFile,
-		failures:  make(map[string][]time.Time),
-		now:       time.Now,
+		catalog:         store,
+		tester:          opts.Tester,
+		config:          cfg,
+		logger:          logger,
+		stateFile:       opts.StateFile,
+		failures:        make(map[string][]time.Time),
+		passiveGrace:    passiveGracePeriod,
+		passiveCooldown: passiveReplaceCooldown,
+		now:             time.Now,
 	}
 	if m.stateFile == "" && cfg != nil {
 		if cur := cfg.Current(); cur != nil {
@@ -410,6 +433,7 @@ func (m *Manager) restoreActive(ctx context.Context, pa contract.Active) error {
 	m.active = &activeWAN{meta: meta, proc: p, routeID: routeIDFor(pa.Link.Hash, p.PID())}
 	m.probeFails = 0
 	m.nextReplaceAt = time.Time{}
+	m.nextPassiveReplaceAt = m.now().Add(m.passiveGraceLocked())
 	m.failures = make(map[string][]time.Time)
 	m.mu.Unlock()
 	_ = m.saveState()
@@ -436,10 +460,13 @@ func (m *Manager) restoreAttempt(ctx context.Context, link contract.Link, timeou
 }
 
 // promotedOrVerified performs one full promotion attempt and, if it fails for
-// a reason other than cancellation, one verification-only start. Ready
-// candidates already passed the full pipeline, so a transient speed-endpoint
-// failure must not cost them their place. Each attempt gets its own bounded
-// timeout; a failed attempt's process is stopped.
+// a reason other than cancellation and no active WAN exists, one
+// verification-only start. Ready candidates already passed the full pipeline,
+// so a transient speed-endpoint failure must not cost them their place during
+// startup or an initial cycle. While an active WAN is serving traffic the
+// fallback is suppressed: a short-lived verification failure must never
+// downgrade a healthy route to an unqualified one. Each attempt gets its own
+// bounded timeout; a failed attempt's process is stopped.
 func (m *Manager) promotedOrVerified(ctx context.Context, link contract.Link, timeout time.Duration) (process, error) {
 	p, promoteErr := m.restoreAttempt(ctx, link, timeout, m.startPromoted)
 	if promoteErr == nil && p != nil {
@@ -451,8 +478,17 @@ func (m *Manager) promotedOrVerified(ctx context.Context, link contract.Link, ti
 	if ctx.Err() != nil {
 		return nil, promoteErr
 	}
-	m.logger.Warn("wan: full promotion failed; retrying verification-only",
-		"hash", link.Hash, "err", promoteErr)
+	// Verification-only starts skip the full quality pipeline. That is an
+	// acceptable last resort when there is no active WAN (initial cycle or
+	// startup restore), but never while a working route is serving traffic:
+	// a transient speed/content failure must not downgrade a healthy WAN.
+	if m.hasActive() {
+		m.logger.Warn("wan: full promotion failed; verification-only fallback suppressed while an active WAN exists",
+			"hash", link.Hash, "err", promoteErr)
+		return nil, promoteErr
+	}
+	m.logger.Warn("wan: full promotion failed; retrying verification-only (degraded)",
+		"hash", link.Hash, "err", promoteErr, "degraded", true)
 	p, verifyErr := m.restoreAttempt(ctx, link, timeout, m.startVerified)
 	if verifyErr != nil {
 		return nil, fmt.Errorf("wan: promotion failed (%v); verification fallback failed: %w", promoteErr, verifyErr)
@@ -475,8 +511,8 @@ func (m *Manager) promotedOrVerified(ctx context.Context, link contract.Link, ti
 			return nil, fmt.Errorf("wan: verification HTTP/2 failed: %w", err)
 		}
 	}
-	m.logger.Info("wan: candidate started via verification-only fallback",
-		"hash", link.Hash, "port", p.Port())
+	m.logger.Warn("wan: candidate started via verification-only fallback; active WAN is degraded",
+		"hash", link.Hash, "port", p.Port(), "degraded", true)
 	return p, nil
 }
 
@@ -615,12 +651,31 @@ func (m *Manager) Snapshot() contract.Snapshot {
 	}
 }
 
-// Entries returns a deep copy of the catalog view.
+// Entries returns a deep copy of the catalog view. The panel uses Recent and
+// RecentTested instead so a request never clones the whole catalog.
 func (m *Manager) Entries() []contract.Entry {
 	if m.catalog == nil {
 		return nil
 	}
 	return copyEntries(m.catalog.Entries())
+}
+
+// Recent returns at most limit catalog entries in panel order. The catalog
+// already cloned only the selected entries, so no second deep copy is made.
+func (m *Manager) Recent(limit int) []contract.Entry {
+	if m.catalog == nil {
+		return nil
+	}
+	return m.catalog.Recent(limit)
+}
+
+// RecentTested returns at most limit entries with test results, newest first,
+// without cloning the full catalog.
+func (m *Manager) RecentTested(limit int) []contract.Entry {
+	if m.catalog == nil {
+		return nil
+	}
+	return m.catalog.RecentTested(limit)
 }
 
 // Route returns the current active SOCKS5 route. There is deliberately no
@@ -650,8 +705,10 @@ func (m *Manager) Route(ctx context.Context) (proxy.Route, error) {
 }
 
 // Report records the outcome of one proxied connection. It never blocks: a
-// third passive failure inside probe_window schedules one asynchronous
-// replacement. Successful routes reset their failure counter.
+// third passive failure inside probe_window may schedule one asynchronous
+// replacement, subject to a post-install grace period and a passive-trigger
+// cooldown. Active liveness probes are not gated by either window. Successful
+// routes reset their failure counter.
 func (m *Manager) Report(ctx context.Context, route proxy.Route, err error) {
 	_ = ctx
 	if err == nil {
@@ -685,12 +742,25 @@ func (m *Manager) Report(ctx context.Context, route proxy.Route, err error) {
 	}
 	m.failures[route.ID] = trimmed
 	n := len(trimmed)
+	if n < passiveFailureThreshold {
+		m.mu.Unlock()
+		return
+	}
+	if now.Before(m.nextPassiveReplaceAt) {
+		next := m.nextPassiveReplaceAt
+		m.mu.Unlock()
+		m.logger.Debug("wan: passive replacement within grace or cooldown",
+			"route", route.ID, "failures", n, "next", next)
+		return
+	}
+	// Arm the cooldown before launching the asynchronous replacement. If the
+	// attempt fails, the next three failures must not start another one until
+	// the cooldown expires.
+	m.nextPassiveReplaceAt = now.Add(m.passiveCooldownLocked())
 	m.mu.Unlock()
 
-	if n >= passiveFailureThreshold {
-		m.logger.Warn("wan: passive failures exceeded threshold; replacing", "route", route.ID, "failures", n)
-		m.triggerReplace("passive failures")
-	}
+	m.logger.Warn("wan: passive failures exceeded threshold; replacing", "route", route.ID, "failures", n)
+	m.triggerReplace("passive failures")
 }
 
 // Cycling reports whether a cycle is currently running.
@@ -997,6 +1067,24 @@ func (m *Manager) takeProbeTokenLocked(now time.Time, perMin int) bool {
 	}
 	m.probeTokens--
 	return true
+}
+
+// passiveGraceLocked returns the configured post-install grace. Callers must
+// hold m.mu.
+func (m *Manager) passiveGraceLocked() time.Duration {
+	if m.passiveGrace > 0 {
+		return m.passiveGrace
+	}
+	return passiveGracePeriod
+}
+
+// passiveCooldownLocked returns the configured passive-trigger cooldown.
+// Callers must hold m.mu.
+func (m *Manager) passiveCooldownLocked() time.Duration {
+	if m.passiveCooldown > 0 {
+		return m.passiveCooldown
+	}
+	return passiveReplaceCooldown
 }
 
 func routeIDFor(hash string, pid int) string {

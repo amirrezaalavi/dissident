@@ -86,6 +86,150 @@ func (s *Store) Entries() []contract.Entry {
 	return out
 }
 
+// Recent returns at most limit entries ordered for the control panel: state
+// priority (testing, active, ready, catalog, failed, unsupported), then most
+// recently updated, then score descending, then hash ascending. It scans the
+// catalog and clones only the selected entries, so its cost is bounded by the
+// map size plus limit rather than by a full-catalog deep copy. A limit of zero
+// or less returns nil.
+func (s *Store) Recent(limit int) []contract.Entry {
+	return s.recent(limit, false)
+}
+
+// RecentTested returns at most limit entries that carry a test result, newest
+// result first, then hash ascending. Like Recent, it clones only the selected
+// entries. A limit of zero or less returns nil.
+func (s *Store) RecentTested(limit int) []contract.Entry {
+	return s.recent(limit, true)
+}
+
+// recent selects the top limit entries without materializing or sorting the
+// whole catalog. The heap keeps the worst selected entry at index zero, so
+// every non-selected map entry costs one comparison and no allocation.
+func (s *Store) recent(limit int, testedOnly bool) []contract.Entry {
+	if s == nil || limit <= 0 {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.entries) == 0 {
+		return nil
+	}
+
+	selected := make([]*contract.Entry, 0, limit)
+	for _, entry := range s.entries {
+		if entry == nil || (testedOnly && entry.Last.At.IsZero()) {
+			continue
+		}
+		if len(selected) < limit {
+			selected = append(selected, entry)
+			if len(selected) == limit {
+				buildWorstHeap(selected, testedOnly)
+			}
+			continue
+		}
+		if recentBefore(entry, selected[0], testedOnly) {
+			selected[0] = entry
+			siftDownWorst(selected, 0, testedOnly)
+		}
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+
+	sort.Slice(selected, func(i, j int) bool {
+		return recentBefore(selected[i], selected[j], testedOnly)
+	})
+	out := make([]contract.Entry, len(selected))
+	for i, entry := range selected {
+		out[i] = cloneEntry(*entry)
+	}
+	return out
+}
+
+// recentBefore reports whether a should be rendered before b.
+func recentBefore(a, b *contract.Entry, testedOnly bool) bool {
+	if testedOnly {
+		if !a.Last.At.Equal(b.Last.At) {
+			return a.Last.At.After(b.Last.At)
+		}
+		return a.Link.Hash < b.Link.Hash
+	}
+	if ra, rb := recentStateRank(a.State), recentStateRank(b.State); ra != rb {
+		return ra < rb
+	}
+	ta, tb := recentEntryTime(a), recentEntryTime(b)
+	if !ta.Equal(tb) {
+		return ta.After(tb)
+	}
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	return a.Link.Hash < b.Link.Hash
+}
+
+// recentEntryTime matches the control panel's notion of "most recently
+// updated": the lifecycle timestamp when present, otherwise the last result.
+func recentEntryTime(entry *contract.Entry) time.Time {
+	if !entry.Updated.IsZero() {
+		return entry.Updated
+	}
+	return entry.Last.At
+}
+
+// recentStateRank matches the /tests page order: testing first, then the
+// serving states, then the remaining lifecycle states. Entries uses a
+// different rank (active first) because it predates the panel view.
+func recentStateRank(state contract.EntryState) int {
+	switch state {
+	case contract.StateTesting:
+		return 0
+	case contract.StateActive:
+		return 1
+	case contract.StateReady:
+		return 2
+	case contract.StateCatalog:
+		return 3
+	case contract.StateFailed:
+		return 4
+	case contract.StateUnsupported:
+		return 5
+	default:
+		return 6
+	}
+}
+
+// recentWorse reports whether a is worse than b, i.e. would render later.
+func recentWorse(a, b *contract.Entry, testedOnly bool) bool {
+	return recentBefore(b, a, testedOnly)
+}
+
+// buildWorstHeap arranges entries so the worst selected entry is at index 0.
+func buildWorstHeap(entries []*contract.Entry, testedOnly bool) {
+	for i := len(entries)/2 - 1; i >= 0; i-- {
+		siftDownWorst(entries, i, testedOnly)
+	}
+}
+
+func siftDownWorst(entries []*contract.Entry, i int, testedOnly bool) {
+	n := len(entries)
+	for {
+		left := 2*i + 1
+		if left >= n {
+			return
+		}
+		worst := left
+		if right := left + 1; right < n && recentWorse(entries[right], entries[left], testedOnly) {
+			worst = right
+		}
+		if !recentWorse(entries[worst], entries[i], testedOnly) {
+			return
+		}
+		entries[i], entries[worst] = entries[worst], entries[i]
+		i = worst
+	}
+}
+
 // Pending returns entries that still need qualification (catalog or failed),
 // ordered by last TCP latency ascending with zero latency last, then by oldest
 // Updated. A limit of zero or less returns every pending entry.
