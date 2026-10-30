@@ -116,9 +116,10 @@ func (m *Manager) installActive(cand contract.Ready, p process) error {
 	if port <= 0 {
 		return errors.New("wan: promoted process has no local port")
 	}
+	now := m.now()
 	meta := contract.Active{
 		Link:      cloneLink(cand.Link),
-		Since:     m.now().UTC(),
+		Since:     now.UTC(),
 		ExitIP:    cand.ExitIP,
 		XrayPID:   p.PID(),
 		LocalPort: port,
@@ -134,6 +135,9 @@ func (m *Manager) installActive(cand contract.Ready, p process) error {
 	m.removeReadyLocked(cand.Link.Hash)
 	m.probeFails = 0
 	m.nextReplaceAt = time.Time{}
+	// Fresh active: stale in-flight connection failures from the swap must not
+	// immediately re-trigger replacement. Liveness probes remain exempt.
+	m.nextPassiveReplaceAt = now.Add(m.passiveGraceLocked())
 	m.failures = make(map[string][]time.Time)
 	m.mu.Unlock()
 

@@ -86,12 +86,44 @@ func TestReplaceFailureTriesNextReady(t *testing.T) {
 	}
 }
 
-func TestReplaceFallsBackToVerificationOnlyPromotion(t *testing.T) {
+func TestReplaceDoesNotUseVerificationOnlyWhileActive(t *testing.T) {
 	m, fr, _ := testManager(t, func(c *config.Config) {
 		c.Swap.DrainTimeout = 20 * time.Millisecond
 	})
 	oldProc := setActive(t, m, testLink("old"), 28010)
 	setReady(m, testReady("flaky-speed", 9))
+	fr.setPromoteFn(func(ctx context.Context, link contract.Link) (process, error) {
+		return nil, errors.New("speed endpoint timed out")
+	})
+	verified := 0
+	m.startVerified = func(ctx context.Context, link contract.Link) (process, error) {
+		verified++
+		return &fakeProcess{port: 28110, pid: 7800}, nil
+	}
+
+	if err := m.Replace(context.Background()); err == nil {
+		t.Fatal("Replace should fail rather than downgrade an active WAN")
+	}
+	if verified != 0 {
+		t.Fatalf("verification fallback calls = %d, want 0 while an active WAN exists", verified)
+	}
+	if got := activeHash(m); got != "old" {
+		t.Fatalf("active = %q, want old route preserved", got)
+	}
+	if oldProc.isStopped() {
+		t.Fatal("old active process was stopped on a failed replacement")
+	}
+	if got := fr.promotionLinks(); len(got) != 1 || got[0] != "flaky-speed" {
+		t.Fatalf("promotions = %v, want one full attempt", got)
+	}
+}
+
+func TestPromoteReadyUsesVerificationOnlyWithoutActive(t *testing.T) {
+	m, fr, _ := testManager(t, func(c *config.Config) {
+		c.Swap.DrainTimeout = 20 * time.Millisecond
+	})
+	cand := testReady("flaky-speed", 9)
+	setReady(m, cand)
 	fr.setPromoteFn(func(ctx context.Context, link contract.Link) (process, error) {
 		return nil, errors.New("speed endpoint timed out")
 	})
@@ -104,24 +136,22 @@ func TestReplaceFallsBackToVerificationOnlyPromotion(t *testing.T) {
 		return &fakeProcess{port: 28110, pid: 7800}, nil
 	}
 
-	if err := m.Replace(context.Background()); err != nil {
-		t.Fatalf("Replace: %v", err)
+	ok, err := m.promoteReady(context.Background(), cand)
+	if err != nil {
+		t.Fatalf("promoteReady: %v", err)
+	}
+	if !ok {
+		t.Fatal("promoteReady = false, want the fallback candidate installed")
+	}
+	if verified != 1 {
+		t.Fatalf("verification fallback calls = %d, want 1 without an active WAN", verified)
 	}
 	if got := activeHash(m); got != "flaky-speed" {
 		t.Fatalf("active = %q, want flaky-speed installed by fallback", got)
 	}
-	if verified != 1 {
-		t.Fatalf("verification fallback calls = %d, want 1", verified)
-	}
-	if got := fr.promotionLinks(); len(got) != 1 || got[0] != "flaky-speed" {
-		t.Fatalf("promotions = %v, want one full attempt", got)
-	}
-	eventually(t, 2*time.Second, "old process drain after fallback promotion", func() bool {
-		return oldProc.isStopped()
-	})
 }
 
-func TestReplaceBothPromotionPathsFailTriesNext(t *testing.T) {
+func TestReplaceActiveSkipsFallbackAndTriesNext(t *testing.T) {
 	m, fr, store := testManager(t, func(c *config.Config) {
 		c.Swap.DrainTimeout = 20 * time.Millisecond
 	})
@@ -138,10 +168,7 @@ func TestReplaceBothPromotionPathsFailTriesNext(t *testing.T) {
 	verified := 0
 	m.startVerified = func(ctx context.Context, link contract.Link) (process, error) {
 		verified++
-		if link.Hash == "bad" {
-			return nil, errors.New("verification failed too")
-		}
-		return &fakeProcess{port: 28112, pid: 7802}, nil
+		return nil, errors.New("verification fallback must not run while active")
 	}
 
 	if err := m.Replace(context.Background()); err != nil {
@@ -150,8 +177,8 @@ func TestReplaceBothPromotionPathsFailTriesNext(t *testing.T) {
 	if got := activeHash(m); got != "good" {
 		t.Fatalf("active = %q, want next candidate good", got)
 	}
-	if verified != 1 {
-		t.Fatalf("verification fallback calls = %d, want 1 (bad only)", verified)
+	if verified != 0 {
+		t.Fatalf("verification fallback calls = %d, want 0 while an active WAN exists", verified)
 	}
 	if hashes := readyHashes(m); len(hashes) != 0 {
 		t.Fatalf("ready = %v, want both candidates consumed", hashes)
