@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -64,6 +65,10 @@ type fakeData struct {
 	cancelCalls     int
 	addCalls        int
 	removeSubCalls  int
+	recentCalls     int
+	testedCalls     int
+	recentLimit     int
+	testedLimit     int
 	replaceDeadline bool
 	removeHash      string
 	addArg          string
@@ -90,10 +95,44 @@ func (f *fakeData) Snapshot() contract.Snapshot {
 	return f.snap
 }
 
-func (f *fakeData) Entries() []contract.Entry {
+func (f *fakeData) Recent(limit int) []contract.Entry {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]contract.Entry(nil), f.entries...)
+	f.recentCalls++
+	f.recentLimit = limit
+	entries := append([]contract.Entry(nil), f.entries...)
+	f.mu.Unlock()
+	if limit <= 0 {
+		return nil
+	}
+	entries = sortedEntries(entries)
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries
+}
+
+func (f *fakeData) RecentTested(limit int) []contract.Entry {
+	f.mu.Lock()
+	f.testedCalls++
+	f.testedLimit = limit
+	entries := append([]contract.Entry(nil), f.entries...)
+	f.mu.Unlock()
+	if limit <= 0 {
+		return nil
+	}
+	tested := entries[:0]
+	for _, entry := range entries {
+		if !entry.Last.At.IsZero() {
+			tested = append(tested, entry)
+		}
+	}
+	sort.SliceStable(tested, func(i, j int) bool {
+		return tested[i].Last.At.After(tested[j].Last.At)
+	})
+	if len(tested) > limit {
+		tested = tested[:limit]
+	}
+	return tested
 }
 
 func (f *fakeData) Cycling() bool {
@@ -505,6 +544,40 @@ func TestPagesRenderAndRedact(t *testing.T) {
 		t.Error("error flash did not use error styling")
 	}
 	assertNoSecrets(t, flash)
+}
+
+func TestPanelUsesBoundedEntryPaths(t *testing.T) {
+	fake := newFakeData(testSnapshot(t))
+	fake.entries = testEntries(t)
+	handler := newTestServer(t, Options{Data: fake, Config: testConfig(t)}).Handler()
+
+	if rec := serve(t, handler, http.MethodGet, "/"); rec.Code != http.StatusOK {
+		t.Fatalf("overview status = %d", rec.Code)
+	}
+	fake.mu.Lock()
+	testedCalls, testedLimit := fake.testedCalls, fake.testedLimit
+	recentCalls := fake.recentCalls
+	fake.mu.Unlock()
+	if testedCalls != 1 || testedLimit != 10 {
+		t.Fatalf("overview called RecentTested %d times with limit %d, want 1/10", testedCalls, testedLimit)
+	}
+	if recentCalls != 0 {
+		t.Fatalf("overview called Recent %d times", recentCalls)
+	}
+
+	if rec := serve(t, handler, http.MethodGet, "/tests"); rec.Code != http.StatusOK {
+		t.Fatalf("tests status = %d", rec.Code)
+	}
+	fake.mu.Lock()
+	recentCalls, recentLimit := fake.recentCalls, fake.recentLimit
+	testedCalls = fake.testedCalls
+	fake.mu.Unlock()
+	if recentCalls != 1 || recentLimit != 200 {
+		t.Fatalf("tests called Recent %d times with limit %d, want 1/200", recentCalls, recentLimit)
+	}
+	if testedCalls != 1 {
+		t.Fatalf("tests called RecentTested %d times, want 1 (overview only)", testedCalls)
+	}
 }
 
 func TestReplaceDisabledWhenReadyEmpty(t *testing.T) {

@@ -615,12 +615,31 @@ func (m *Manager) Snapshot() contract.Snapshot {
 	}
 }
 
-// Entries returns a deep copy of the catalog view.
+// Entries returns a deep copy of the catalog view. The panel uses Recent and
+// RecentTested instead so a request never clones the whole catalog.
 func (m *Manager) Entries() []contract.Entry {
 	if m.catalog == nil {
 		return nil
 	}
 	return copyEntries(m.catalog.Entries())
+}
+
+// Recent returns at most limit catalog entries in panel order. The catalog
+// already cloned only the selected entries, so no second deep copy is made.
+func (m *Manager) Recent(limit int) []contract.Entry {
+	if m.catalog == nil {
+		return nil
+	}
+	return m.catalog.Recent(limit)
+}
+
+// RecentTested returns at most limit entries with test results, newest first,
+// without cloning the full catalog.
+func (m *Manager) RecentTested(limit int) []contract.Entry {
+	if m.catalog == nil {
+		return nil
+	}
+	return m.catalog.RecentTested(limit)
 }
 
 // Route returns the current active SOCKS5 route. There is deliberately no
