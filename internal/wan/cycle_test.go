@@ -36,8 +36,11 @@ func TestCycleFillsReadyAndPromotesFirstPasser(t *testing.T) {
 	if tests != 3 {
 		t.Fatalf("tests = %d, want 3 (active + 2 ready)", tests)
 	}
-	if promotes != 1 {
-		t.Fatalf("promotions = %d, want 1", promotes)
+	if promotes != 0 {
+		t.Fatalf("full promotions = %d, want 0 for a just-tested candidate", promotes)
+	}
+	if got := fr.trustedLinks(); len(got) != 1 {
+		t.Fatalf("trusted promotions = %v, want 1", got)
 	}
 	if m.LastCycle().IsZero() || m.NextCycle().IsZero() || !m.NextCycle().After(m.LastCycle()) {
 		t.Fatalf("cycle timestamps not recorded: last=%v next=%v", m.LastCycle(), m.NextCycle())
@@ -52,6 +55,13 @@ func TestCyclePromotionFallsBackToVerificationOnly(t *testing.T) {
 		c.Cycle.ReadyTarget = 3
 	})
 	store.Merge([]contract.Link{testLink("flaky-cycle")})
+	// Force a stale full-Test stamp so the promotion keeps the full pipeline
+	// (and therefore its degraded verification fallback).
+	fr.setTestFn(func(ctx context.Context, link contract.Link) contract.Result {
+		res := testResult(link, 10)
+		res.At = time.Now().Add(-promotionTrustWindow - time.Minute).UTC()
+		return res
+	})
 	fr.setPromoteFn(func(ctx context.Context, link contract.Link) (process, error) {
 		return nil, errors.New("speed endpoint timed out")
 	})

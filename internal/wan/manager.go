@@ -59,6 +59,15 @@ const (
 	speedLivenessInterval = 5 * time.Minute
 	// speedLivenessTimeout bounds the 1 MB speed probe.
 	speedLivenessTimeout = 30 * time.Second
+	// promotionTrustWindow is how long a full-Test pass remains trustworthy
+	// for the lightweight promotion path. A candidate normally reaches
+	// promotion seconds after Test (the cycle promotes its first pass
+	// immediately), so the window only has to cover scheduler latency, a
+	// replacement triggered shortly after a test, and a quick restart. Eight
+	// minutes spans several ready_liveness ticks (100s by default) without
+	// surviving a full 30-minute cycle: a standby that waited that long may
+	// have degraded and deserves the full pipeline again.
+	promotionTrustWindow = 8 * time.Minute
 )
 
 var (
@@ -186,6 +195,7 @@ type Manager struct {
 	// Function fields exist so Replace, liveness, restore fallback, and
 	// persistence can be exercised without a real xray process or network.
 	startPromoted func(context.Context, contract.Link) (process, error)
+	startTrusted  func(context.Context, contract.Link) (process, error)
 	startVerified func(context.Context, contract.Link) (process, error)
 	stopProcess   func(context.Context, process) error
 	probe         func(context.Context, string) error
@@ -229,6 +239,7 @@ func New(opts Options) *Manager {
 		}
 	}
 	m.startPromoted = m.startWithTester
+	m.startTrusted = m.startTrustedWithTester
 	m.startVerified = m.verificationRestore
 	m.stopProcess = func(ctx context.Context, p process) error { return p.Stop(ctx) }
 	m.probe = m.probeWithTester
@@ -270,6 +281,26 @@ func (m *Manager) startWithTester(ctx context.Context, link contract.Link) (proc
 		return nil, err
 	} else if x == nil {
 		return nil, errors.New("wan: promote returned no xray process")
+	} else {
+		return &platformProcess{x: x}, nil
+	}
+}
+
+// startTrustedWithTester is the fast promotion path for a ready entry whose
+// full Test pass is still inside promotionTrustWindow. It renders and starts
+// xray and requires one 2xx verify; it never re-runs upload, HTTP/2, speed,
+// content, or stability.
+func (m *Manager) startTrustedWithTester(ctx context.Context, link contract.Link) (process, error) {
+	if m.tester == nil {
+		return nil, errors.New("wan: qualify tester is not configured")
+	}
+	if _, x, err := m.tester.PromoteTrusted(ctx, link); err != nil {
+		if x != nil {
+			_ = x.Stop(context.Background())
+		}
+		return nil, err
+	} else if x == nil {
+		return nil, errors.New("wan: trusted promote returned no xray process")
 	} else {
 		return &platformProcess{x: x}, nil
 	}

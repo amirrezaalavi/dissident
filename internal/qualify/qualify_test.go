@@ -583,3 +583,49 @@ func TestPromoteRealXray(t *testing.T) {
 		t.Fatalf("expected failed promotion, got process=%v err=%v", process, err)
 	}
 }
+
+func TestPromoteTrustedRealXray(t *testing.T) {
+	if !realXrayAvailable() {
+		t.Skip("xray binary not installed")
+	}
+	server := startTestHTTP(t)
+	socksAddr := startTestSOCKS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Poison every stage the trusted path must skip. If PromoteTrusted calls
+	// upload, HTTP/2, or speed it will fail instead of returning a process.
+	poisoned := fullPipelineOptions(server)
+	poisoned.URLs.Upload = server.URL + "/fail"
+	poisoned.URLs.HTTP2 = server.URL + "/fail"
+	poisoned.URLs.Speed = server.URL + "/fail"
+	poisoned.URLs.SpeedFallback = server.URL + "/fail"
+
+	result, xray, err := New(poisoned).PromoteTrusted(ctx, socksLink(t, socksAddr))
+	if err != nil {
+		t.Fatalf("PromoteTrusted: %v", err)
+	}
+	if xray == nil || !xray.Alive() {
+		t.Fatal("PromoteTrusted returned no live process")
+	}
+	if !result.OK || result.Reason != "ok" || result.Stage != contract.StageReal {
+		t.Fatalf("result = %+v", result)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer stopCancel()
+	defer xray.Stop(stopCtx)
+
+	// The same poisoned configuration must fail the full path at upload,
+	// proving the trusted path really skipped those stages.
+	if _, process, err := New(poisoned).Promote(ctx, socksLink(t, socksAddr)); err == nil || process != nil {
+		t.Fatalf("full Promote with poisoned upload/speed = (%v, %v), want failure", process, err)
+	}
+
+	// A failed trusted verify must stop its process and return nil.
+	failing := New(fullPipelineOptions(server))
+	failing.urls.Verify = []string{server.URL + "/fail"}
+	_, process, err := failing.PromoteTrusted(ctx, socksLink(t, socksAddr))
+	if err == nil || process != nil {
+		t.Fatalf("expected failed trusted promotion, got process=%v err=%v", process, err)
+	}
+}

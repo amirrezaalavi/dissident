@@ -81,10 +81,12 @@ type fakeRuntime struct {
 	nextPort int
 	testFn   func(context.Context, contract.Link) contract.Result
 	promote  func(context.Context, contract.Link) (process, error)
+	trusted  func(context.Context, contract.Link) (process, error)
 	probeFn  func(context.Context, string) error
 
 	testCalls    []string
 	promoteCalls []string
+	trustedCalls []string
 	probeCalls   []string
 	procs        []*fakeProcess
 }
@@ -92,6 +94,7 @@ type fakeRuntime struct {
 func (f *fakeRuntime) install(m *Manager) {
 	m.testOne = f.test
 	m.startPromoted = f.startPromoted
+	m.startTrusted = f.startTrusted
 	m.startVerified = func(context.Context, contract.Link) (process, error) {
 		return nil, errors.New("test: verification restore fallback disabled")
 	}
@@ -108,6 +111,12 @@ func (f *fakeRuntime) setTestFn(fn func(context.Context, contract.Link) contract
 func (f *fakeRuntime) setPromoteFn(fn func(context.Context, contract.Link) (process, error)) {
 	f.mu.Lock()
 	f.promote = fn
+	f.mu.Unlock()
+}
+
+func (f *fakeRuntime) setTrustedFn(fn func(context.Context, contract.Link) (process, error)) {
+	f.mu.Lock()
+	f.trusted = fn
 	f.mu.Unlock()
 }
 
@@ -143,6 +152,21 @@ func (f *fakeRuntime) startPromoted(ctx context.Context, link contract.Link) (pr
 	return fn(ctx, link)
 }
 
+func (f *fakeRuntime) startTrusted(ctx context.Context, link contract.Link) (process, error) {
+	f.mu.Lock()
+	f.trustedCalls = append(f.trustedCalls, link.Hash)
+	fn := f.trusted
+	if fn == nil {
+		f.nextPort++
+		p := &fakeProcess{port: 21000 + f.nextPort, pid: 6000 + f.nextPort}
+		f.procs = append(f.procs, p)
+		f.mu.Unlock()
+		return p, nil
+	}
+	f.mu.Unlock()
+	return fn(ctx, link)
+}
+
 func (f *fakeRuntime) probe(ctx context.Context, addr string) error {
 	f.mu.Lock()
 	f.probeCalls = append(f.probeCalls, addr)
@@ -158,6 +182,14 @@ func (f *fakeRuntime) counts() (tests, promotes, probes int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.testCalls), len(f.promoteCalls), len(f.probeCalls)
+}
+
+func (f *fakeRuntime) trustedLinks() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.trustedCalls))
+	copy(out, f.trustedCalls)
+	return out
 }
 
 func (f *fakeRuntime) promotionLinks() []string {

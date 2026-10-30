@@ -82,10 +82,18 @@ type Entry struct {
 
 // Ready is a qualified standby link available for promotion.
 type Ready struct {
-	Link      Link
-	Score     float64
+	Link  Link
+	Score float64
+	// LastCheck is refreshed by cheap ready liveness. It proves only that the
+	// endpoint accepted a TCP connection recently, not that it still passes
+	// the full qualification pipeline.
 	LastCheck time.Time
-	ExitIP    string
+	// TestedAt records when this entry last passed the full qualification
+	// pipeline. It is set only on admission from a full Test pass and is never
+	// refreshed by ready liveness or score updates. Promotion may trust it
+	// within a short freshness window and skip the expensive re-test.
+	TestedAt time.Time
+	ExitIP   string
 }
 
 // Active is the single WAN currently serving traffic.
