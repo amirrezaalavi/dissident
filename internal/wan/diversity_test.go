@@ -127,8 +127,22 @@ func TestBuildCycleQueueBoundsNonCloudflareBatch(t *testing.T) {
 	}
 
 	limited, limitedQueued := buildCycleQueue(entries, true, false, diversityReserveBatch, 10)
-	if len(limited) != 10 || limitedQueued != 10 {
-		t.Fatalf("test cap queue = %d/%d, want 10/10", len(limited), limitedQueued)
+	if len(limited) != 9 || limitedQueued != 5 {
+		t.Fatalf("test cap queue = %d/%d, want 9/5 (5 non-CF + 4 CF)", len(limited), limitedQueued)
+	}
+	for i := 0; i < 5; i++ {
+		if provider.ClassifyLink(limited[i].Link) != provider.NonCloudflare {
+			t.Fatalf("capped queue[%d] is not non-Cloudflare reserve", i)
+		}
+	}
+	for i := 5; i < 9; i++ {
+		if provider.ClassifyLink(limited[i].Link) != provider.Cloudflare {
+			t.Fatalf("capped queue[%d] is not Cloudflare fill", i)
+		}
+	}
+	one, oneQueued := buildCycleQueue(entries, true, false, diversityReserveBatch, 1)
+	if len(one) != 1 || oneQueued != 0 || provider.ClassifyLink(one[0].Link) != provider.Cloudflare {
+		t.Fatalf("cap-1 queue = %v/%d, want one Cloudflare fill slot", one, oneQueued)
 	}
 	reserveOnly, reserveOnlyQueued := buildCycleQueue(entries, true, true, diversityReserveBatch, 0)
 	if len(reserveOnly) != diversityReserveBatch || reserveOnlyQueued != diversityReserveBatch {
@@ -137,6 +151,26 @@ func TestBuildCycleQueueBoundsNonCloudflareBatch(t *testing.T) {
 	for _, entry := range reserveOnly {
 		if provider.ClassifyLink(entry.Link) != provider.NonCloudflare {
 			t.Fatalf("reserve-only queue contains %q", entry.Link.Hash)
+		}
+	}
+}
+
+func TestBuildCycleQueueCapKeepsCloudflareFillAheadOfUnknown(t *testing.T) {
+	entries := []contract.Entry{
+		entryAt("non-1", "8.8.8.8", 443),
+		entryAt("unknown-1", "example.com", 443),
+		entryAt("cf-1", "104.16.0.1", 443),
+		entryAt("unknown-2", "other.example", 443),
+		entryAt("cf-2", "104.17.0.1", 443),
+	}
+	queue, queued := buildCycleQueue(entries, true, false, diversityReserveBatch, 3)
+	if len(queue) != 3 || queued != 1 {
+		t.Fatalf("queue = %d/%d, want 3/1", len(queue), queued)
+	}
+	want := []string{"non-1", "cf-1", "cf-2"}
+	for i, hash := range want {
+		if queue[i].Link.Hash != hash {
+			t.Fatalf("queue[%d] = %q, want %q", i, queue[i].Link.Hash, hash)
 		}
 	}
 }
@@ -309,6 +343,60 @@ func TestReadyAdmissionAvoidsActiveEndpoint(t *testing.T) {
 	}
 	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "distinct" {
 		t.Fatalf("ready = %v, want only the distinct endpoint", hashes)
+	}
+}
+
+func TestReadyAdmissionEvictionReturnsEntryToCatalog(t *testing.T) {
+	m, _, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyMin = 1
+		c.Cycle.ReadyTarget = 2
+	})
+	keep := readyAt("keep-high", "9.9.9.9", 443, 5)
+	evict := readyAt("evict-low", "8.8.8.8", 443, 4)
+	cand := readyAt("new-high", "11.11.11.11", 443, 100)
+	setReady(m, keep, evict)
+	store.Merge([]contract.Link{keep.Link, evict.Link, cand.Link})
+	now := time.Now().UTC()
+	store.Mark("keep-high", contract.StateReady, contract.Result{
+		Hash: "keep-high", Stage: contract.StageReal, OK: true, SpeedMbps: 5, At: now,
+	})
+	store.Mark("evict-low", contract.StateReady, contract.Result{
+		Hash: "evict-low", Stage: contract.StageReal, OK: true, SpeedMbps: 4, At: now,
+	})
+
+	if !m.addReady(cand, 2) {
+		t.Fatal("new higher-score candidate was not admitted")
+	}
+	hashes := readyHashes(m)
+	if len(hashes) != 2 || !hasHash(hashes, "new-high") || !hasHash(hashes, "keep-high") {
+		t.Fatalf("ready = %v, want new-high and keep-high", hashes)
+	}
+	if hasHash(hashes, "evict-low") {
+		t.Fatalf("ready = %v, evicted entry is still in the pool", hashes)
+	}
+
+	var evicted *contract.Entry
+	for _, entry := range store.Pending(0) {
+		if entry.Link.Hash == "evict-low" {
+			copied := entry
+			evicted = &copied
+			break
+		}
+	}
+	if evicted == nil {
+		t.Fatal("evicted entry is not Pending; it can never be retested")
+	}
+	if evicted.State != contract.StateCatalog {
+		t.Fatalf("evicted state = %q, want catalog", evicted.State)
+	}
+	if evicted.Last.Reason != readyEvictionReason {
+		t.Fatalf("evicted reason = %q, want %q", evicted.Last.Reason, readyEvictionReason)
+	}
+	if evicted.Score != 4 {
+		t.Fatalf("evicted score = %v, want the preserved last score 4", evicted.Score)
+	}
+	if !evicted.Last.OK || evicted.Last.Stage != contract.StageReal || !evicted.Last.At.Equal(now) {
+		t.Fatalf("evicted last result was not preserved: %+v", evicted.Last)
 	}
 }
 

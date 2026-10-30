@@ -26,6 +26,10 @@ const (
 	// the catalog measurement. The cap is relaxed only while the pool would
 	// otherwise fall below cycle.ready_min.
 	maxReadyPerPrefix = 1
+
+	// readyEvictionReason is stored on a ready entry that admission removed
+	// for policy (target or duplicate-domain cap), not because it failed.
+	readyEvictionReason = "evicted by ready diversity/target cap"
 )
 
 // buildCycleQueue builds this cycle's bounded qualification queue.
@@ -55,23 +59,46 @@ func buildCycleQueue(entries []contract.Entry, reserve, reserveOnly bool, nonCFL
 		return batch, len(batch)
 	}
 
+	// With a configured real-test cap, the reserve must not consume every slot:
+	// otherwise a large non-Cloudflare batch could prevent any Cloudflare fill
+	// and fail to restore readiness. Give the reserve at most half the cap and
+	// leave the rest for the Cloudflare fill. A cap of one leaves the slot for
+	// Cloudflare (readiness wins when both groups cannot fit). With the default
+	// cap of zero the full 120-candidate reserve budget remains available.
+	if testCap > 0 {
+		reserveCap := testCap / 2
+		if len(batch) > reserveCap {
+			batch = batch[:reserveCap]
+		}
+	}
+
 	queue = make([]contract.Entry, 0, len(batch)+len(entries))
 	queue = append(queue, batch...)
 	used := make(map[string]struct{}, len(batch))
 	for _, entry := range batch {
 		used[entry.Link.Hash] = struct{}{}
 	}
+	cloudflare := make([]contract.Entry, 0, len(entries)-len(batch))
+	unknown := make([]contract.Entry, 0)
 	for _, entry := range entries {
 		if _, ok := used[entry.Link.Hash]; ok {
 			continue
 		}
-		// Non-Cloudflare overflow is intentionally deferred to a later cycle:
-		// the batch is a bound, not the start of a full-catalog sweep.
-		if provider.ClassifyLink(entry.Link) == provider.NonCloudflare {
-			continue
+		switch provider.ClassifyLink(entry.Link) {
+		case provider.Cloudflare:
+			cloudflare = append(cloudflare, entry)
+		case provider.NonCloudflare:
+			// Non-Cloudflare overflow is intentionally deferred to a later
+			// cycle: the batch is a bound, not the start of a full-catalog
+			// sweep.
+		default:
+			unknown = append(unknown, entry)
 		}
-		queue = append(queue, entry)
 	}
+	// Prefer Cloudflare fill over unknown entries when the cap truncates the
+	// queue, so the reserve cannot starve readiness through an unknown pile.
+	queue = append(queue, cloudflare...)
+	queue = append(queue, unknown...)
 	queue = applyTestCap(queue, testCap)
 	return queue, countNonCloudflare(queue)
 }

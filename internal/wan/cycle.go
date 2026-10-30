@@ -391,27 +391,45 @@ func (m *Manager) addReady(cand contract.Ready, target int) bool {
 			existing = append(existing, r)
 		}
 	}
-	activeEndpoint, activePrefix := "", ""
+	activeEndpoint, activePrefix, activeHash := "", "", ""
 	if m.active != nil {
+		activeHash = m.active.meta.Link.Hash
 		activeEndpoint = provider.EndpointKey(m.active.meta.Link)
 		activePrefix = provider.PrefixKey(m.active.meta.Link)
 	}
 	selected := selectReadyWithCaps(existing, cand, target, minReady,
 		activeEndpoint, activePrefix)
 
+	selectedHashes := make(map[string]struct{}, len(selected))
 	admitted := false
 	for _, r := range selected {
+		selectedHashes[r.Link.Hash] = struct{}{}
 		if r.Link.Hash == cand.Link.Hash {
 			admitted = true
-			break
 		}
 	}
 	if !admitted {
 		m.mu.Unlock()
 		return false
 	}
+	evicted := make([]string, 0)
+	for _, r := range existing {
+		if _, ok := selectedHashes[r.Link.Hash]; !ok {
+			evicted = append(evicted, r.Link.Hash)
+		}
+	}
 	m.ready = selected
 	m.mu.Unlock()
+
+	// Policy eviction is not a failure. Mark the entry back to catalog outside
+	// the manager lock so it remains eligible for Pending and can be retested
+	// in a later cycle. Reclassify preserves the last result and score.
+	for _, hash := range evicted {
+		if hash == activeHash {
+			continue
+		}
+		m.markCatalogState(hash, contract.StateCatalog, readyEvictionReason)
+	}
 	_ = m.saveState()
 	return true
 }
