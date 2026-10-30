@@ -206,7 +206,7 @@ func TestCycleReserveFillsNonCloudflareWhenAvailable(t *testing.T) {
 	}
 }
 
-func TestCycleOnlyCloudflareStillFillsAndRecordsShortfall(t *testing.T) {
+func TestCycleOnlyCloudflareFillsWithoutShortfall(t *testing.T) {
 	m, _, store := testManager(t, func(c *config.Config) {
 		c.Cycle.ReadyTarget = 2
 		c.Cycle.ReadyMin = 1
@@ -228,11 +228,107 @@ func TestCycleOnlyCloudflareStillFillsAndRecordsShortfall(t *testing.T) {
 	if !snap.Diversity.SingleProvider || snap.Diversity.ReadyCloudflare != 2 {
 		t.Fatalf("diversity = %+v, want a single-provider Cloudflare pool", snap.Diversity)
 	}
+	if snap.Diversity.Shortfall || snap.Diversity.ShortfallEvents != 0 {
+		t.Fatalf("diversity shortfall = %+v, want none when zero non-CF candidates were tested", snap.Diversity)
+	}
+	if !snap.Diversity.LastShortfall.IsZero() {
+		t.Fatal("shortfall timestamp set without a tested reserve candidate")
+	}
+}
+
+func TestCycleEmptyReserveQueueDoesNotRecordShortfall(t *testing.T) {
+	m, fr, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 2
+		c.Cycle.ReadyMin = 1
+	})
+	setActive(t, m, linkAt("active-cf", "172.64.150.28", 2082), 34004)
+	setReady(m,
+		readyAt("ready-cf-1", "104.16.0.5", 443, 9),
+		readyAt("ready-cf-2", "104.17.0.5", 443, 8),
+	)
+	store.Merge([]contract.Link{linkAt("cooling-noncf", "8.8.8.8", 443)})
+	store.Mark("cooling-noncf", contract.StateFailed, contract.Result{
+		Hash: "cooling-noncf", Stage: contract.StageTCP, OK: false,
+		Reason: "timeout", At: time.Now().UTC(),
+	})
+
+	if err := m.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	if calls := fr.testLinks(); len(calls) != 0 {
+		t.Fatalf("test calls = %v, want an empty cooldown queue", calls)
+	}
+	snap := m.Snapshot()
+	if snap.Diversity.Shortfall || snap.Diversity.ShortfallEvents != 0 {
+		t.Fatalf("empty refill polluted shortfall: %+v", snap.Diversity)
+	}
+}
+
+func TestCycleReserveFailureRecordsTestedCount(t *testing.T) {
+	m, fr, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 2
+		c.Cycle.ReadyMin = 1
+	})
+	setActive(t, m, linkAt("active-cf", "172.64.150.28", 2082), 34005)
+	store.Merge([]contract.Link{
+		linkAt("noncf-fail", "8.8.8.8", 443),
+		linkAt("cf-1", "104.16.0.1", 443),
+		linkAt("cf-2", "104.17.0.1", 443),
+	})
+	fr.setTestFn(func(ctx context.Context, link contract.Link) contract.Result {
+		if link.Hash == "noncf-fail" {
+			return contract.Result{
+				Hash: link.Hash, Stage: contract.StageTCP, OK: false,
+				Reason: "unreachable", At: time.Now().UTC(),
+			}
+		}
+		return testResult(link, 10)
+	})
+
+	if err := m.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	if hashes := readyHashes(m); len(hashes) != 2 {
+		t.Fatalf("ready = %v, want Cloudflare fill despite the failed reserve", hashes)
+	}
+	snap := m.Snapshot()
 	if !snap.Diversity.Shortfall || snap.Diversity.ShortfallEvents != 1 {
-		t.Fatalf("diversity shortfall = %+v, want one event", snap.Diversity)
+		t.Fatalf("diversity shortfall = %+v, want one event after a tested reserve miss", snap.Diversity)
 	}
 	if snap.Diversity.LastShortfall.IsZero() {
 		t.Fatal("shortfall timestamp is zero")
+	}
+}
+
+func TestCycleSuccessfulReserveClearsShortfall(t *testing.T) {
+	m, _, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 2
+		c.Cycle.ReadyMin = 1
+	})
+	setActive(t, m, linkAt("active-cf", "172.64.150.28", 2082), 34006)
+	store.Merge([]contract.Link{
+		linkAt("noncf-pass", "8.8.8.8", 443),
+		linkAt("cf-1", "104.16.0.1", 443),
+	})
+	m.mu.Lock()
+	m.diversityShortfall = true
+	m.diversityShortfallEvents = 3
+	m.lastDiversityShortfall = time.Now().Add(-time.Hour).UTC()
+	m.mu.Unlock()
+
+	if err := m.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	hashes := readyHashes(m)
+	if !hasHash(hashes, "noncf-pass") {
+		t.Fatalf("ready = %v, want the successful reserve candidate", hashes)
+	}
+	snap := m.Snapshot()
+	if snap.Diversity.Shortfall {
+		t.Fatalf("shortfall flag was not cleared after a successful reserve: %+v", snap.Diversity)
+	}
+	if snap.Diversity.ShortfallEvents != 3 {
+		t.Fatalf("shortfall events = %d, a success must not increment the counter", snap.Diversity.ShortfallEvents)
 	}
 }
 
