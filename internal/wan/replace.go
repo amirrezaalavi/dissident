@@ -44,11 +44,7 @@ func (m *Manager) Replace(ctx context.Context) error {
 	}
 	sortReady(candidates)
 
-	cfg := m.currentConfig()
-	promotionTimeout := cfg.Swap.PromotionTimeout
-	if promotionTimeout <= 0 {
-		promotionTimeout = 15 * time.Second
-	}
+	promotionTimeout := m.promotionTimeout()
 
 	var lastErr error
 	for _, cand := range candidates {
@@ -167,10 +163,7 @@ func (m *Manager) promoteReady(ctx context.Context, cand contract.Ready) (bool, 
 	if m.hasActive() {
 		return false, nil
 	}
-	promotionTimeout := m.currentConfig().Swap.PromotionTimeout
-	if promotionTimeout <= 0 {
-		promotionTimeout = 15 * time.Second
-	}
+	promotionTimeout := m.promotionTimeout()
 	p, mode, err := m.promoteCandidate(ctx, cand, promotionTimeout)
 	if err != nil {
 		return false, err

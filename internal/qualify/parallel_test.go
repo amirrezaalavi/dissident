@@ -11,6 +11,7 @@ import (
 
 	"dissident/internal/config"
 	"dissident/internal/contract"
+	"dissident/internal/platform"
 )
 
 func TestCheapStageWorkerLimit(t *testing.T) {
@@ -70,5 +71,79 @@ func TestCanceledStageAcquire(t *testing.T) {
 	cancel()
 	if err := tester.acquire(ctx, tester.cheapSem); !errors.Is(err, context.Canceled) {
 		t.Fatalf("acquire error = %v, want context.Canceled", err)
+	}
+}
+
+// TestPromotionUsesDedicatedSlotWhenRealWorkersBusy saturates the cycle's deep
+// test semaphore, then proves trusted promotion still gets past the acquire
+// instead of blocking until the context deadline. The xray binary is
+// deliberately absent: the promotion must reach render/start and fail there.
+func TestPromotionUsesDedicatedSlotWhenRealWorkersBusy(t *testing.T) {
+	link := socksLink(t, "127.0.0.1:1")
+	for name, promote := range map[string]func(*Tester, context.Context, contract.Link) (contract.Result, *platform.Xray, error){
+		"trusted": (*Tester).PromoteTrusted,
+		"full":    (*Tester).Promote,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tester := New(Options{
+				Test:    config.TestConfig{RealWorkers: 1, XrayTimeout: time.Second},
+				XrayBin: "/nonexistent/xray-for-promotion-slot-test",
+			})
+			tester.realSem <- struct{}{}
+			defer func() { <-tester.realSem }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			start := time.Now()
+			_, xray, err := promote(tester, ctx, link)
+			if xray != nil {
+				t.Fatal("promotion with a missing xray binary returned a process")
+			}
+			if err == nil {
+				t.Fatal("promotion with a missing xray binary should fail at start")
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("promotion blocked on realSem until ctx deadline: %v", err)
+			}
+			if elapsed := time.Since(start); elapsed >= time.Second {
+				t.Fatalf("promotion took %v, looks blocked on realSem", elapsed)
+			}
+			if got := len(tester.promoteSem); got != 0 {
+				t.Fatalf("promotion slot held after failure: %d", got)
+			}
+		})
+	}
+}
+
+// TestPromotionSlotCapacityOneAndCancel proves the promotion slot has capacity
+// one and that a canceled acquire does not leak the slot.
+func TestPromotionSlotCapacityOneAndCancel(t *testing.T) {
+	tester := New(Options{
+		Test:    config.TestConfig{RealWorkers: 1, XrayTimeout: time.Second},
+		XrayBin: "/nonexistent/xray-for-promotion-slot-test",
+	})
+	tester.promoteSem <- struct{}{} // simulate an in-flight promotion
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, xray, err := tester.PromoteTrusted(ctx, socksLink(t, "127.0.0.1:1"))
+	if err == nil || xray != nil {
+		t.Fatalf("second promotion = (%v, %v), want capacity-1 rejection", xray, err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("second promotion returned before the slot deadline; capacity is not one")
+	}
+	if got := len(tester.promoteSem); got != 1 {
+		t.Fatalf("manually held promotion slot = %d, want 1", got)
+	}
+	<-tester.promoteSem
+
+	canceled, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	if _, xray, err := tester.PromoteTrusted(canceled, socksLink(t, "127.0.0.1:1")); err == nil || xray != nil {
+		t.Fatalf("canceled promotion = (%v, %v), want context error", xray, err)
+	}
+	if got := len(tester.promoteSem); got != 0 {
+		t.Fatalf("promotion slot leaked after canceled acquire: %d", got)
 	}
 }

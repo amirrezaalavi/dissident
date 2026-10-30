@@ -12,6 +12,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -748,6 +750,105 @@ func TestPromoteTrustedRetriesTransientVerifyAndKeepsProcess(t *testing.T) {
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer stopCancel()
 	defer xray.Stop(stopCtx)
+}
+
+func TestPromotionSlotReleasedAfterSuccessAndVerifyFailure(t *testing.T) {
+	if !realXrayAvailable() {
+		t.Skip("xray binary not installed")
+	}
+	server := startTestHTTP(t)
+	socksAddr := startTestSOCKS(t)
+	link := socksLink(t, socksAddr)
+
+	t.Run("success", func(t *testing.T) {
+		tester := New(fullPipelineOptions(server))
+		tester.trustedVerify = func(context.Context, string) error { return nil }
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		result, xray, err := tester.PromoteTrusted(ctx, link)
+		if err != nil {
+			t.Fatalf("PromoteTrusted: %v", err)
+		}
+		if xray == nil || !result.OK {
+			t.Fatalf("promotion = (%+v, %v), want a live process", result, xray)
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 6*time.Second)
+		_ = xray.Stop(stopCtx)
+		stopCancel()
+		if got := len(tester.promoteSem); got != 0 {
+			t.Fatalf("promotion slot held after success: %d", got)
+		}
+	})
+
+	t.Run("verify failure", func(t *testing.T) {
+		tester := New(fullPipelineOptions(server))
+		tester.urls.Verify = []string{server.URL + "/fail"}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, xray, err := tester.PromoteTrusted(ctx, link)
+		if err == nil || xray != nil {
+			t.Fatalf("promotion with a non-2xx verify = (%v, %v), want failure", xray, err)
+		}
+		if got := len(tester.promoteSem); got != 0 {
+			t.Fatalf("promotion slot held after verify failure: %d", got)
+		}
+	})
+}
+
+func TestPromotionSlotSerializesConcurrentPromotions(t *testing.T) {
+	if !realXrayAvailable() {
+		t.Skip("xray binary not installed")
+	}
+	server := startTestHTTP(t)
+	socksAddr := startTestSOCKS(t)
+	link := socksLink(t, socksAddr)
+	tester := New(fullPipelineOptions(server))
+
+	var active, maximum int32
+	tester.trustedVerify = func(context.Context, string) error {
+		current := atomic.AddInt32(&active, 1)
+		for {
+			previous := atomic.LoadInt32(&maximum)
+			if current <= previous || atomic.CompareAndSwapInt32(&maximum, previous, current) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		atomic.AddInt32(&active, -1)
+		return nil
+	}
+
+	const n = 3
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			_, xray, err := tester.PromoteTrusted(ctx, link)
+			if xray != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 6*time.Second)
+				_ = xray.Stop(stopCtx)
+				stopCancel()
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent promotion: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&maximum); got != 1 {
+		t.Fatalf("max concurrent promotions = %d, want 1", got)
+	}
+	if got := len(tester.promoteSem); got != 0 {
+		t.Fatalf("promotion slot held after concurrent promotions: %d", got)
+	}
 }
 
 func TestPromoteTrustedDoesNotRetryStaticFailure(t *testing.T) {

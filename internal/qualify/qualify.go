@@ -58,8 +58,11 @@ type Options struct {
 // Tester runs qualification stages. It holds only immutable configuration
 // after New, so concurrent Test calls are safe. The cheap, real, and speed
 // semaphores enforce test.cheap_workers, test.real_workers, and one serialized
-// speed transfer. portMu serializes free-port allocation plus xray startup so
-// concurrent deep tests cannot race for the same loopback port.
+// speed transfer. promoteSem is a dedicated capacity-1 slot for promotion so a
+// promotion never waits behind all real_workers deep tests; at most one
+// promotion runs at a time, while the cycle keeps using realSem. portMu
+// serializes free-port allocation plus xray startup so concurrent deep tests
+// cannot race for the same loopback port.
 type Tester struct {
 	test        config.TestConfig
 	urls        config.URLsConfig
@@ -75,10 +78,11 @@ type Tester struct {
 	// without a live upstream.
 	trustedVerify func(context.Context, string) error
 
-	cheapSem chan struct{}
-	realSem  chan struct{}
-	speedSem chan struct{}
-	portMu   sync.Mutex
+	cheapSem   chan struct{}
+	realSem    chan struct{}
+	speedSem   chan struct{}
+	promoteSem chan struct{}
+	portMu     sync.Mutex
 }
 
 // New builds a Tester, applying defaults for unset bounds and constructing
@@ -99,6 +103,7 @@ func New(opts Options) *Tester {
 		cheapSem:    make(chan struct{}, test.CheapWorkers),
 		realSem:     make(chan struct{}, test.RealWorkers),
 		speedSem:    make(chan struct{}, 1),
+		promoteSem:  make(chan struct{}, 1),
 	}
 	if tester.egressProxy != "" {
 		dial, err := platform.NewEgressDialer(tester.egressProxy, test.TCPTimeout)
@@ -388,7 +393,9 @@ func (t *Tester) PromoteTrusted(ctx context.Context, link contract.Link) (contra
 }
 
 // promote implements both promotion modes. full selects the original strict
-// pipeline; otherwise only render, start, and one verify run.
+// pipeline; otherwise only render, start, and one verify run. Promotion takes
+// the dedicated capacity-1 promoteSem, never realSem: a cycle holding every
+// real_workers slot must not starve a promotion into a context deadline.
 func (t *Tester) promote(ctx context.Context, link contract.Link, full bool) (contract.Result, *platform.Xray, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -413,10 +420,10 @@ func (t *Tester) promote(ctx context.Context, link contract.Link, full bool) (co
 	if err := validateProtocol(link); err != nil {
 		return fail(contract.StageProtocol, "protocol: %s", detailOf(err))
 	}
-	if err := t.acquire(ctx, t.realSem); err != nil {
+	if err := t.acquire(ctx, t.promoteSem); err != nil {
 		return fail(contract.StageReal, "real: %s", detailOf(err))
 	}
-	defer t.release(t.realSem)
+	defer t.release(t.promoteSem)
 
 	t.portMu.Lock()
 	port, err := platform.FreePort()
