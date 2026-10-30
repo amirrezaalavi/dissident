@@ -361,8 +361,30 @@ func (t *Tester) Test(ctx context.Context, link contract.Link) contract.Result {
 // optionally measures speed/TTFB. On success the caller owns the returned
 // process; on any failure the process is stopped and an error returned.
 func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Result, *platform.Xray, error) {
+	return t.promote(ctx, link, true)
+}
+
+// PromoteTrusted is the promotion path for a ready entry whose full Test pass
+// is still fresh. It repeats only the steps that must be re-established for a
+// new process: static support, credential validation, render, xray start, and
+// one 2xx verify through the local SOCKS endpoint. Upload, HTTP/2, speed,
+// content, and stability are deliberately skipped because the full Test that
+// admitted the entry already proved them. On success the caller owns the
+// returned process; on any failure the process is stopped and an error
+// returned.
+func (t *Tester) PromoteTrusted(ctx context.Context, link contract.Link) (contract.Result, *platform.Xray, error) {
+	return t.promote(ctx, link, false)
+}
+
+// promote implements both promotion modes. full selects the original strict
+// pipeline; otherwise only render, start, and one verify run.
+func (t *Tester) promote(ctx context.Context, link contract.Link, full bool) (contract.Result, *platform.Xray, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	mode := "trusted"
+	if full {
+		mode = "full"
 	}
 	result := contract.Result{Hash: link.Hash, At: time.Now().UTC()}
 	fail := func(stage contract.Stage, format string, args ...any) (contract.Result, *platform.Xray, error) {
@@ -370,7 +392,7 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 		result.OK = false
 		result.Reason = fmt.Sprintf(format, args...)
 		result.At = time.Now().UTC()
-		t.log.Debug("promotion failed", "hash", link.Hash, "stage", stage, "reason", result.Reason)
+		t.log.Debug("promotion failed", "hash", link.Hash, "stage", stage, "mode", mode, "reason", result.Reason)
 		return result, nil, errors.New(result.Reason)
 	}
 
@@ -422,6 +444,18 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 	result.HTTPStatus = verified.Status
 	result.Bytes = verified.Bytes
 
+	if !full {
+		// The full Test already proved upload, HTTP/2, content, speed, and
+		// stability. A fresh ready entry only needs a working SOCKS path.
+		result.Stage = contract.StageReal
+		result.OK = true
+		result.Reason = "ok"
+		result.At = time.Now().UTC()
+		success = true
+		t.log.Debug("promotion passed", "hash", link.Hash, "port", xray.Port, "mode", mode)
+		return result, xray, nil
+	}
+
 	if err := t.Upload(ctx, socksAddr); err != nil {
 		return fail(contract.StageReal, "upload: %s", detailOf(err))
 	}
@@ -454,7 +488,7 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 	result.Reason = "ok"
 	result.At = time.Now().UTC()
 	success = true
-	t.log.Debug("promotion passed", "hash", link.Hash, "port", xray.Port)
+	t.log.Debug("promotion passed", "hash", link.Hash, "port", xray.Port, "mode", mode)
 	return result, xray, nil
 }
 

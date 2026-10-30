@@ -341,10 +341,15 @@ func (m *Manager) readyFrom(entry contract.Entry, res contract.Result) contract.
 	if check.IsZero() {
 		check = m.now().UTC()
 	}
+	// readyFrom is reached only from a full Test pass (applyCycleResult returns
+	// earlier when !res.OK), so this is the single admission point that may
+	// stamp trusted-test evidence. Ready liveness and score updates must never
+	// touch TestedAt.
 	return contract.Ready{
 		Link:      cloneLink(entry.Link),
 		Score:     score,
 		LastCheck: check,
+		TestedAt:  check,
 		ExitIP:    res.ExitIP,
 	}
 }

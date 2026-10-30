@@ -15,7 +15,9 @@ import (
 
 func TestReplaceSuccessSwapsAndDrainsOld(t *testing.T) {
 	m, fr, _ := testManager(t, func(c *config.Config) {
-		c.Swap.DrainTimeout = 60 * time.Millisecond
+		// Wide enough that scheduler jitter after the 20ms check cannot make
+		// the drain timer look premature on a loaded builder.
+		c.Swap.DrainTimeout = 300 * time.Millisecond
 	})
 	old := testLink("old")
 	oldProc := setActive(t, m, old, 28000)

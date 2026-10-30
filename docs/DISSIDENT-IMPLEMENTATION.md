@@ -143,6 +143,7 @@ type Ready struct {
     Link      Link
     Score     float64
     LastCheck time.Time
+    TestedAt  time.Time
     ExitIP    string
 }
 
@@ -376,6 +377,7 @@ type Tester struct { /* ... */ }
 func New(opts Options) *Tester
 func (t *Tester) Test(ctx context.Context, link contract.Link) contract.Result
 func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Result, *platform.Xray, error)
+func (t *Tester) PromoteTrusted(ctx context.Context, link contract.Link) (contract.Result, *platform.Xray, error)
 func (t *Tester) Verify(ctx context.Context, socksAddr string) error
 func (t *Tester) Speed(ctx context.Context, socksAddr string) (mbps float64, ttfb time.Duration, err error)
 func (t *Tester) Probe(ctx context.Context, socksAddr string) error
@@ -387,6 +389,9 @@ that has not passed TCP/TLS/protocol must never start the real xray. The real xr
 started once per candidate and reused for real/content/speed/stability, then stopped.
 `Promote` starts a candidate xray, verifies a 2xx through it, optionally measures speed,
 and returns the running process; on failure it stops the process and returns the error.
+`PromoteTrusted` is the lightweight path for a ready entry whose full Test pass is within
+the WAN promotion trust window: it renders, starts xray, and requires one 2xx verify,
+skipping upload/HTTP-2/speed/content/stability because the full Test already proved them.
 `Verify` and `Probe` follow redirects and require a 2xx. `Speed` reads exactly
 `test.speed_size` bytes, tries `urls.speed` then `urls.speed_fallback` on transport
 errors or non-2xx, and returns Mbps = bytes*8/elapsed/1e6.
