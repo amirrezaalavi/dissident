@@ -342,8 +342,9 @@ func (m *Manager) readyHasNonCloudflare() bool {
 }
 
 // recordDiversityShortfall increments the shortfall event counter and logs one
-// bounded event per reserve attempt that produced no non-Cloudflare standby.
-func (m *Manager) recordDiversityShortfall(nonCFCandidates int) {
+// bounded event per reserve attempt that actually tested candidates and
+// produced no non-Cloudflare standby.
+func (m *Manager) recordDiversityShortfall(queued, tested int) {
 	now := m.now().UTC()
 	m.mu.Lock()
 	m.diversityShortfall = true
@@ -353,7 +354,8 @@ func (m *Manager) recordDiversityShortfall(nonCFCandidates int) {
 	m.mu.Unlock()
 	m.logger.Warn("wan: diversity_shortfall",
 		"reason", "no non-Cloudflare standby qualified",
-		"non_cloudflare_candidates", nonCFCandidates,
+		"non_cloudflare_queued", queued,
+		"non_cloudflare_tested", tested,
 		"ready", ready)
 }
 

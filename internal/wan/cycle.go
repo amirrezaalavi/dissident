@@ -210,6 +210,7 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	canceled := false
 	launched := 0
 	inFlight := 0
+	nonCFTested := 0
 	for {
 		for !stop && !canceled && launched < len(queue) && inFlight < workers {
 			if err := cycleCtx.Err(); err != nil {
@@ -224,6 +225,9 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 			select {
 			case tasks <- entry:
 				inFlight++
+				if reserveNeeded && provider.ClassifyLink(entry.Link) == provider.NonCloudflare {
+					nonCFTested++
+				}
 			case <-cycleCtx.Done():
 				m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
 					Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
@@ -271,10 +275,17 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 
 	_ = m.saveState()
 	if reserveNeeded && !canceled {
-		if m.readyHasNonCloudflare() {
+		switch {
+		case m.readyHasNonCloudflare():
 			m.clearDiversityShortfall()
-		} else {
-			m.recordDiversityShortfall(reserveQueued)
+		case reserveQueued == 0 || nonCFTested == 0:
+			// An empty queue is usually a cooldown/no-candidate no-op, not a
+			// failed reserve attempt. Do not pollute the shortfall counter or
+			// gauge when no non-Cloudflare candidate was actually tested.
+			m.logger.Debug("wan: empty diversity reserve; no shortfall recorded",
+				"queued", reserveQueued, "tested", nonCFTested)
+		default:
+			m.recordDiversityShortfall(reserveQueued, nonCFTested)
 		}
 	} else if m.readyHasNonCloudflare() {
 		// A normal cycle may also have supplied a non-Cloudflare entry (for
