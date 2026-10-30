@@ -3,6 +3,8 @@ package wan
 import (
 	"context"
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"os"
@@ -262,12 +264,13 @@ func testManager(t *testing.T, mutate func(*config.Config)) (*Manager, *fakeRunt
 }
 
 func testLink(hash string) contract.Link {
+	server := testServer(hash)
 	return contract.Link{
-		Raw:      "vless://" + testUUID + "@example.com:443?type=tcp&security=none#" + hash,
+		Raw:      "vless://" + testUUID + "@" + server + ":443?type=tcp&security=none#" + hash,
 		Hash:     hash,
 		Protocol: contract.ProtocolVLESS,
 		Name:     hash,
-		Server:   "example.com",
+		Server:   server,
 		Port:     443,
 		Params: map[string]string{
 			"uuid":     testUUID,
@@ -275,6 +278,22 @@ func testLink(hash string) contract.Link {
 			"security": "none",
 		},
 	}
+}
+
+// testServer maps a test hash to a stable public literal IPv4 address outside
+// the published Cloudflare ranges. Distinct hashes normally get distinct /24s
+// so endpoint-aware admission does not collapse unrelated fixtures. Test
+// hostnames are avoided because the provider classifier deliberately treats
+// unresolved names as unknown.
+func testServer(hash string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(hash))
+	v := h.Sum32()
+	// 11.0.0.0/8 through 42.0.0.0/8 are public and outside Cloudflare's
+	// published ranges. The first octet still spreads /24 keys while keeping
+	// fixtures inside a deterministic test-only block.
+	first := 11 + int(v>>24)%32
+	return fmt.Sprintf("%d.%d.%d.%d", first, byte(v>>16), byte(v>>8), byte(v))
 }
 
 func testReady(hash string, score float64) contract.Ready {

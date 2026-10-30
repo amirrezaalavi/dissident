@@ -171,16 +171,22 @@ type Manager struct {
 	nextPassiveReplaceAt time.Time
 	passiveGrace         time.Duration
 	passiveCooldown      time.Duration
-	cycleCancel          context.CancelFunc
-	launchCtx            context.Context
-	cancel               context.CancelFunc
-	started              bool
-	stopping             bool
-	stopped              bool
-	draining             map[int]process
-	nextDrainID          int
-	probeTokens          float64
-	probeTokensAt        time.Time
+	// diversityShortfall is set after a reserve attempt that produced no
+	// non-Cloudflare standby. The counter and timestamp survive until restart
+	// (they are deliberately not part of the persisted state format).
+	diversityShortfall       bool
+	diversityShortfallEvents uint64
+	lastDiversityShortfall   time.Time
+	cycleCancel              context.CancelFunc
+	launchCtx                context.Context
+	cancel                   context.CancelFunc
+	started                  bool
+	stopping                 bool
+	stopped                  bool
+	draining                 map[int]process
+	nextDrainID              int
+	probeTokens              float64
+	probeTokensAt            time.Time
 
 	cycling   atomic.Bool
 	replaceMu sync.Mutex
@@ -665,6 +671,9 @@ func (m *Manager) Snapshot() contract.Snapshot {
 		active = &meta
 	}
 	ready := cloneReady(m.ready)
+	shortfall := m.diversityShortfall
+	shortfallEvents := m.diversityShortfallEvents
+	lastShortfall := m.lastDiversityShortfall
 	m.mu.Unlock()
 
 	total, supported, testing := 0, 0, 0
@@ -678,6 +687,7 @@ func (m *Manager) Snapshot() contract.Snapshot {
 		CatalogCount:   total,
 		SupportedCount: supported,
 		Testing:        testing,
+		Diversity:      diversityStats(ready, shortfall, shortfallEvents, lastShortfall),
 		Updated:        m.now().UTC(),
 	}
 }

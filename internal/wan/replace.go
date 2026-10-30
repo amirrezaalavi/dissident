@@ -349,3 +349,13 @@ func (m *Manager) markCatalog(hash string, state contract.EntryState, res contra
 	}
 	m.catalog.Mark(hash, state, res)
 }
+
+// markCatalogState changes only the catalog lifecycle state. It is used for
+// policy evictions, where the entry did not fail and its last result/score must
+// be preserved so the entry can be reconsidered later.
+func (m *Manager) markCatalogState(hash string, state contract.EntryState, reason string) {
+	if m.catalog == nil || hash == "" {
+		return
+	}
+	m.catalog.Reclassify(hash, state, reason)
+}

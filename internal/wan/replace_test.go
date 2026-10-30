@@ -15,8 +15,8 @@ import (
 
 func TestReplaceSuccessSwapsAndDrainsOld(t *testing.T) {
 	m, fr, _ := testManager(t, func(c *config.Config) {
-		// Wide enough that scheduler jitter after the 20ms check cannot make
-		// the drain timer look premature on a loaded builder.
+		// Wide enough that scheduler jitter after the pre-drain check cannot
+		// make the drain timer look premature on a loaded builder.
 		c.Swap.DrainTimeout = 300 * time.Millisecond
 	})
 	old := testLink("old")
@@ -35,7 +35,7 @@ func TestReplaceSuccessSwapsAndDrainsOld(t *testing.T) {
 	if oldProc.isStopped() {
 		t.Fatalf("old process was stopped before the drain timeout")
 	}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 	if oldProc.isStopped() {
 		t.Fatalf("old process stopped during drain window")
 	}

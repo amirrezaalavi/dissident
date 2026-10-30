@@ -105,6 +105,26 @@ type Active struct {
 	LocalPort int
 }
 
+// Diversity summarizes the provider and failure-domain mix of the ready pool.
+// Counts are best-effort: the classifier uses published Cloudflare IPv4 ranges
+// and never resolves hostnames or consults an ASN database.
+type Diversity struct {
+	ReadyCloudflare    int
+	ReadyNonCloudflare int
+	ReadyUnknown       int
+	ReadyDomains       int
+	// SingleProvider is true when every ready entry is a known provider class
+	// and all of them are the same.
+	SingleProvider bool
+	// Shortfall reports that the most recent diversity reserve attempt finished
+	// without a non-Cloudflare standby.
+	Shortfall bool
+	// ShortfallEvents counts completed reserve attempts that found no qualifying
+	// non-Cloudflare standby. It resets on process restart.
+	ShortfallEvents uint64
+	LastShortfall   time.Time
+}
+
 // Snapshot is the immutable runtime view served to the control plane.
 type Snapshot struct {
 	Generation     uint64
@@ -113,6 +133,7 @@ type Snapshot struct {
 	CatalogCount   int
 	SupportedCount int
 	Testing        int
+	Diversity      Diversity
 	Updated        time.Time
 }
 
