@@ -136,7 +136,7 @@ func TestLoadSanitizesTrailingURLArtifacts(t *testing.T) {
 	body := `
 [urls]
 probe = https://probe.example/, https://probe2.example/\
-verify = "https://verify.example/" , https://verify2.example/\ 
+verify = "https://verify.example/" , https://verify2.example/\
 content = https://www.youtube.com/, https://www.youtube.com/\, "https://www.youtube.com/", https://example.com/some/path
 speed = https://speed.example/file\
 speed_fallback = https://fallback.example/file/
