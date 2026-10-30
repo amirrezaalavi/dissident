@@ -17,6 +17,7 @@ type overviewPage struct {
 	ReadyTarget   int
 	ReadyMin      int
 	ReadyBelowMin bool
+	Diversity     contract.Diversity
 	Ready         []readyRow
 	Recent        []testRow
 	CycleState    string
@@ -35,6 +36,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		ReadyCount:  len(snap.Ready),
 		ReadyTarget: s.readyTarget(),
 		ReadyMin:    s.readyMin(),
+		Diversity:   diversityView(snap),
 		Ready:       readyRows(snap.Ready, 8, false),
 	}
 	p.Refresh = true
@@ -65,6 +67,7 @@ type wanPage struct {
 	ReadyCount  int
 	ReadyTarget int
 	ReadyMin    int
+	Diversity   contract.Diversity
 	CanReplace  bool
 }
 
@@ -78,6 +81,7 @@ func (s *Server) handleWAN(w http.ResponseWriter, r *http.Request) {
 		ReadyCount:  len(snap.Ready),
 		ReadyTarget: s.readyTarget(),
 		ReadyMin:    s.readyMin(),
+		Diversity:   diversityView(snap),
 		CanReplace:  hasData && len(snap.Ready) > 0,
 	}
 	if !hasData {

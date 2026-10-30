@@ -9,6 +9,7 @@ import (
 
 	"dissident/internal/catalog"
 	"dissident/internal/contract"
+	"dissident/internal/provider"
 )
 
 // RunCycle fetches configured sources, merges links into the catalog, and tests
@@ -118,11 +119,18 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	}
 
 	if m.hasActive() && m.readyCount() >= target {
-		// Nothing to fill. Avoid launching a wave of tests that would only be
-		// discarded when the coordinator notices the target is already met.
-		m.logger.Info("wan: cycle already at ready target", "ready", m.readyCount(), "target", target)
-		return nil
+		// The ready target is met, but a Cloudflare-only pool may still be
+		// missing the provider reserve. In that case run a bounded reserve
+		// probe instead of returning early; otherwise the soft reserve could
+		// never fire while readiness is healthy.
+		if !m.readyLacksNonCloudflare() {
+			m.logger.Info("wan: cycle already at ready target", "ready", m.readyCount(), "target", target)
+			return nil
+		}
 	}
+
+	reserveNeeded := m.readyLacksNonCloudflare()
+	reserveOnly := reserveNeeded && m.hasActive() && m.readyCount() >= target
 
 	// Build one finite queue for this cycle. Failed entries inside the retry
 	// cooldown are left for a later cycle instead of being hammered by every
@@ -140,7 +148,7 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	if cooldown < 0 {
 		cooldown = 0
 	}
-	queue := make([]contract.Entry, 0)
+	pending := make([]contract.Entry, 0)
 	for _, entry := range m.catalog.Pending(0) {
 		if entry.Link.Hash == "" || entry.Link.Hash == activeHash {
 			continue
@@ -151,11 +159,9 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		if entry.State == contract.StateFailed && cooldown > 0 && now.Sub(entry.Updated) < cooldown {
 			continue
 		}
-		queue = append(queue, entry)
+		pending = append(pending, entry)
 	}
-	if testCap := cfg.Test.RealTestCap; testCap > 0 && len(queue) > testCap {
-		queue = queue[:testCap]
-	}
+	queue, reserveQueued := buildCycleQueue(pending, reserveNeeded, reserveOnly, diversityReserveBatch, cfg.Test.RealTestCap)
 
 	workers := cfg.Test.CheapWorkers
 	if workers < 2 {
@@ -174,7 +180,10 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		"cheap_workers", cfg.Test.CheapWorkers,
 		"real_workers", cfg.Test.RealWorkers,
 		"ready", m.readyCount(),
-		"target", target)
+		"target", target,
+		"provider_reserve", reserveNeeded,
+		"reserve_only", reserveOnly,
+		"non_cloudflare_queued", reserveQueued)
 
 	type outcome struct {
 		entry contract.Entry
@@ -261,6 +270,17 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	}
 
 	_ = m.saveState()
+	if reserveNeeded && !canceled {
+		if m.readyHasNonCloudflare() {
+			m.clearDiversityShortfall()
+		} else {
+			m.recordDiversityShortfall(reserveQueued)
+		}
+	} else if m.readyHasNonCloudflare() {
+		// A normal cycle may also have supplied a non-Cloudflare entry (for
+		// example after a manual action); clear a stale shortfall flag.
+		m.clearDiversityShortfall()
+	}
 	if !m.hasActive() {
 		if cycleErr == nil {
 			cycleErr = errors.New("wan: cycle: no active WAN available")
@@ -313,14 +333,16 @@ func (m *Manager) applyCycleResult(ctx context.Context, entry contract.Entry, re
 		}
 	}
 
-	// A burst of concurrent passes can finish after the target is already
-	// full. Keep those entries in the catalog for the next cycle instead of
-	// marking a ready entry that addReady immediately drops.
-	if m.readyCount() >= target {
+	// Endpoint-aware admission decides whether this candidate earns a slot and
+	// which existing standby it displaces. A qualified candidate that loses to
+	// diversity caps stays in the catalog (not ready) for a later cycle rather
+	// than being marked ready while absent from the pool.
+	if !m.addReady(cand, target) {
+		m.logger.Debug("wan: ready candidate not admitted by endpoint/provider caps",
+			"hash", entry.Link.Hash, "ready", m.readyCount(), "target", target)
 		m.markCatalog(entry.Link.Hash, contract.StateCatalog, res)
 		return
 	}
-	m.addReady(cand, target)
 	m.markCatalog(entry.Link.Hash, contract.StateReady, res)
 }
 
@@ -349,32 +371,49 @@ func (m *Manager) readyFrom(entry contract.Entry, res contract.Result) contract.
 	}
 }
 
-func (m *Manager) addReady(cand contract.Ready, target int) {
+// addReady applies endpoint-aware admission and persists the result. It
+// reports whether the candidate earned a slot. A rejected candidate leaves the
+// existing pool untouched.
+func (m *Manager) addReady(cand contract.Ready, target int) bool {
 	if cand.Link.Hash == "" {
-		return
+		return false
 	}
+	cfg := m.currentConfig()
+	minReady := cfg.Cycle.ReadyMin
 	m.mu.Lock()
 	if m.active != nil && m.active.meta.Link.Hash == cand.Link.Hash {
 		m.mu.Unlock()
-		return
+		return false
 	}
-	replaced := false
-	for i := range m.ready {
-		if m.ready[i].Link.Hash == cand.Link.Hash {
-			m.ready[i] = cand
-			replaced = true
+	existing := make([]contract.Ready, 0, len(m.ready)+1)
+	for _, r := range m.ready {
+		if r.Link.Hash != cand.Link.Hash {
+			existing = append(existing, r)
+		}
+	}
+	activeEndpoint, activePrefix := "", ""
+	if m.active != nil {
+		activeEndpoint = provider.EndpointKey(m.active.meta.Link)
+		activePrefix = provider.PrefixKey(m.active.meta.Link)
+	}
+	selected := selectReadyWithCaps(existing, cand, target, minReady,
+		activeEndpoint, activePrefix)
+
+	admitted := false
+	for _, r := range selected {
+		if r.Link.Hash == cand.Link.Hash {
+			admitted = true
 			break
 		}
 	}
-	if !replaced {
-		m.ready = append(m.ready, cand)
+	if !admitted {
+		m.mu.Unlock()
+		return false
 	}
-	sortReady(m.ready)
-	if target > 0 && len(m.ready) > target {
-		m.ready = m.ready[:target]
-	}
+	m.ready = selected
 	m.mu.Unlock()
 	_ = m.saveState()
+	return true
 }
 
 func (m *Manager) readyHashesLocked() map[string]struct{} {

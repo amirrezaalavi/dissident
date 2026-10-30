@@ -25,16 +25,24 @@
 
 <section class="card">
   <h2>Ready standbys <span class="muted">({{.ReadyCount}} / {{.ReadyTarget}} target, minimum {{.ReadyMin}})</span></h2>
+  <dl class="kv">
+    <dt>Provider mix</dt><dd>{{.Diversity.ReadyCloudflare}} Cloudflare, {{.Diversity.ReadyNonCloudflare}} non-Cloudflare{{if .Diversity.ReadyUnknown}}, {{.Diversity.ReadyUnknown}} unknown{{end}}</dd>
+    <dt>Failure domains</dt><dd>{{.Diversity.ReadyDomains}} distinct /24 or hostname</dd>
+  </dl>
+  {{if .Diversity.SingleProvider}}<p class="warn">All ready standbys share one provider class.</p>{{end}}
+  {{if .Diversity.Shortfall}}<p class="warn">The last provider reserve attempt found no non-Cloudflare standby.</p>{{end}}
   {{if .Ready}}
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Name</th><th>Server</th><th>Protocol</th><th>Score</th><th>Last check</th><th>Exit IP</th><th>Action</th></tr></thead>
+      <thead><tr><th>Name</th><th>Server</th><th>Protocol</th><th>Provider</th><th>Domain</th><th>Score</th><th>Last check</th><th>Exit IP</th><th>Action</th></tr></thead>
       <tbody>
       {{range .Ready}}
         <tr>
           <td>{{.Name}}</td>
           <td>{{.ServerPort}}</td>
           <td>{{.Protocol}}</td>
+          <td>{{.Provider}}</td>
+          <td>{{.Domain}}</td>
           <td class="num">{{.Score}}</td>
           <td>{{.LastCheck}}</td>
           <td>{{.ExitIP}}</td>

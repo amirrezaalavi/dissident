@@ -15,7 +15,10 @@ import (
 
 func TestReplaceSuccessSwapsAndDrainsOld(t *testing.T) {
 	m, fr, _ := testManager(t, func(c *config.Config) {
-		c.Swap.DrainTimeout = 60 * time.Millisecond
+		// Keep the drain window comfortably longer than the pre-drain check:
+		// under the race detector a 20 ms sleep can otherwise outlive a short
+		// 60 ms timer on a loaded host.
+		c.Swap.DrainTimeout = 250 * time.Millisecond
 	})
 	old := testLink("old")
 	oldProc := setActive(t, m, old, 28000)
@@ -33,7 +36,7 @@ func TestReplaceSuccessSwapsAndDrainsOld(t *testing.T) {
 	if oldProc.isStopped() {
 		t.Fatalf("old process was stopped before the drain timeout")
 	}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 	if oldProc.isStopped() {
 		t.Fatalf("old process stopped during drain window")
 	}

@@ -22,12 +22,16 @@
     <h2>Readiness</h2>
     <dl class="kv">
       <dt>Ready standbys</dt><dd><strong>{{.ReadyCount}} / {{.ReadyTarget}}</strong> target (minimum {{.ReadyMin}})</dd>
+      <dt>Provider mix</dt><dd>{{.Diversity.ReadyCloudflare}} Cloudflare, {{.Diversity.ReadyNonCloudflare}} non-Cloudflare{{if .Diversity.ReadyUnknown}}, {{.Diversity.ReadyUnknown}} unknown{{end}}</dd>
+      <dt>Failure domains</dt><dd>{{.Diversity.ReadyDomains}} distinct /24 or hostname</dd>
       <dt>Catalog entries</dt><dd>{{.Snapshot.CatalogCount}}</dd>
       <dt>Supported entries</dt><dd>{{.Snapshot.SupportedCount}}</dd>
       <dt>Testing now</dt><dd>{{.Snapshot.Testing}}</dd>
       <dt>Config generation</dt><dd>{{.Snapshot.Generation}}</dd>
     </dl>
     {{if .ReadyBelowMin}}<p class="warn">Ready standbys are below the configured minimum.</p>{{end}}
+    {{if .Diversity.SingleProvider}}<p class="warn">All ready standbys share one provider class.</p>{{end}}
+    {{if .Diversity.Shortfall}}<p class="warn">The last provider reserve attempt found no non-Cloudflare standby.</p>{{end}}
   </section>
 
   <section class="card">

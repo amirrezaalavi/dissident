@@ -505,8 +505,8 @@ func TestPagesRenderAndRedact(t *testing.T) {
 		path  string
 		wants []string
 	}{
-		{"/", []string{"Overview", "Active WAN", "tokyo-1", "Config generation", "http-equiv=\"refresh\"", "Top ready entries", "Recent test results"}},
-		{"/wan", []string{"Replace active", "Ready standbys", "Remove", "tokyo-1", "osaka-2"}},
+		{"/", []string{"Overview", "Active WAN", "tokyo-1", "Config generation", "http-equiv=\"refresh\"", "Top ready entries", "Recent test results", "Provider mix", "Failure domains"}},
+		{"/wan", []string{"Replace active", "Ready standbys", "Remove", "tokyo-1", "osaka-2", "Provider mix", "Failure domains"}},
 		{"/tests", []string{"Run cycle", "Cancel", "Qualification results", "tls", "Catalog entries"}},
 		{"/subscriptions", []string{"Subscriptions", "Add subscription", "2 local links", "https://subs.example/plain.txt"}},
 		{"/settings", []string{"Settings", "server.panel_listen", "SIGHUP", "urls.probe"}},
@@ -780,6 +780,13 @@ func TestMetrics(t *testing.T) {
 		"dissident_config_generation 12",
 		"dissident_active_wan 1",
 		"dissident_ready_entries 2",
+		"dissident_ready_provider{provider=\"cloudflare\"} 0",
+		"dissident_ready_provider{provider=\"non-cloudflare\"} 0",
+		"dissident_ready_provider{provider=\"unknown\"} 2",
+		"dissident_ready_domains 1",
+		"dissident_ready_single_provider 0",
+		"dissident_diversity_shortfall 0",
+		"dissident_diversity_shortfall_total 0",
 		"dissident_catalog_entries 30",
 		"dissident_supported_entries 20",
 		"dissident_testing_entries 1",
@@ -793,6 +800,30 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 	assertNoSecrets(t, body)
+}
+
+func TestPanelSurfacesSingleProviderPool(t *testing.T) {
+	snap := testSnapshot(t)
+	for i := range snap.Ready {
+		snap.Ready[i].Link.Server = fmt.Sprintf("104.16.0.%d", i+1)
+		snap.Ready[i].Link.Port = 443
+	}
+	snap.Diversity = contract.Diversity{Shortfall: true, ShortfallEvents: 2}
+	fake := newFakeData(snap)
+	handler := newTestServer(t, Options{Data: fake, Config: testConfig(t)}).Handler()
+
+	for _, path := range []string{"/", "/wan"} {
+		body := serve(t, handler, http.MethodGet, path).Body.String()
+		for _, want := range []string{
+			"All ready standbys share one provider class",
+			"found no non-Cloudflare standby",
+			"Cloudflare",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s does not contain %q", path, want)
+			}
+		}
+	}
 }
 
 func TestLogsPage(t *testing.T) {
