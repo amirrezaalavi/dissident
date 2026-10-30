@@ -44,6 +44,22 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			lastCycle = 0
 		}
 	}
+	diversity := diversityView(snap)
+	lastShortfall := int64(0)
+	if !diversity.LastShortfall.IsZero() {
+		lastShortfall = diversity.LastShortfall.Unix()
+		if lastShortfall < 0 {
+			lastShortfall = 0
+		}
+	}
+	shortfall := 0
+	if diversity.Shortfall {
+		shortfall = 1
+	}
+	singleProvider := 0
+	if diversity.SingleProvider {
+		singleProvider = 1
+	}
 
 	var b strings.Builder
 	writeMetric := func(name, help, kind string, value any) {
@@ -56,6 +72,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeMetric("dissident_config_generation", "Current accepted configuration generation.", "gauge", snap.Generation)
 	writeMetric("dissident_active_wan", "Whether an active WAN is installed (0 or 1).", "gauge", active)
 	writeMetric("dissident_ready_entries", "Number of standby links ready for promotion.", "gauge", len(snap.Ready))
+	fmt.Fprintf(&b, "# HELP dissident_ready_provider Ready standbys by provider class.\n")
+	fmt.Fprintf(&b, "# TYPE dissident_ready_provider gauge\n")
+	fmt.Fprintf(&b, "dissident_ready_provider{provider=\"cloudflare\"} %d\n", diversity.ReadyCloudflare)
+	fmt.Fprintf(&b, "dissident_ready_provider{provider=\"non-cloudflare\"} %d\n", diversity.ReadyNonCloudflare)
+	fmt.Fprintf(&b, "dissident_ready_provider{provider=\"unknown\"} %d\n", diversity.ReadyUnknown)
+	writeMetric("dissident_ready_domains", "Distinct /24 (or hostname) failure domains among ready standbys.", "gauge", diversity.ReadyDomains)
+	writeMetric("dissident_ready_single_provider", "Whether every ready standby is in the same known provider class (0 or 1).", "gauge", singleProvider)
+	writeMetric("dissident_diversity_shortfall", "Whether the last provider reserve attempt found no non-Cloudflare standby (0 or 1).", "gauge", shortfall)
+	writeMetric("dissident_diversity_shortfall_total", "Provider reserve attempts that found no non-Cloudflare standby.", "counter", diversity.ShortfallEvents)
+	writeMetric("dissident_diversity_last_shortfall_timestamp", "Unix timestamp of the last provider diversity shortfall (0 if none).", "gauge", lastShortfall)
 	writeMetric("dissident_catalog_entries", "Number of catalog entries.", "gauge", snap.CatalogCount)
 	writeMetric("dissident_supported_entries", "Number of catalog entries supported by the renderer.", "gauge", snap.SupportedCount)
 	writeMetric("dissident_testing_entries", "Number of entries currently under test.", "gauge", snap.Testing)

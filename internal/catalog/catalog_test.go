@@ -195,6 +195,56 @@ func TestStorePendingOrdering(t *testing.T) {
 	}
 }
 
+func TestStoreReclassifyPreservesResultAndScore(t *testing.T) {
+	store := New()
+	one := parseLink(t, linkOne)
+	store.Merge([]contract.Link{one})
+	at := time.Now().Add(-time.Hour).UTC()
+	store.Mark(one.Hash, contract.StateReady, contract.Result{
+		Hash: one.Hash, Stage: contract.StageReal, OK: true,
+		SpeedMbps: 12.5, At: at,
+	})
+	before := store.Entries()[0]
+	if before.Score == 0 {
+		t.Fatal("setup did not produce a score")
+	}
+
+	if !store.Reclassify(one.Hash, contract.StateCatalog, "evicted by policy") {
+		t.Fatal("Reclassify returned false for a known hash")
+	}
+	entries := store.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	got := entries[0]
+	if got.State != contract.StateCatalog {
+		t.Fatalf("state = %q, want catalog", got.State)
+	}
+	if got.Score != before.Score {
+		t.Fatalf("score = %v, want preserved %v", got.Score, before.Score)
+	}
+	if !got.Last.OK || got.Last.Stage != contract.StageReal || !got.Last.At.Equal(at) {
+		t.Fatalf("last result not preserved: %+v", got.Last)
+	}
+	if got.Last.Reason != "evicted by policy" {
+		t.Fatalf("reason = %q", got.Last.Reason)
+	}
+	if got.Attempts != before.Attempts {
+		t.Fatalf("attempts = %d, want preserved %d", got.Attempts, before.Attempts)
+	}
+	if !got.Updated.After(before.Updated) && !got.Updated.Equal(before.Updated) {
+		t.Fatalf("updated = %v, want refreshed", got.Updated)
+	}
+	// The entry is eligible for a later qualification cycle.
+	pending := store.Pending(0)
+	if len(pending) != 1 || pending[0].Link.Hash != one.Hash {
+		t.Fatalf("pending = %+v, want the reclassified entry", pending)
+	}
+	if store.Reclassify("missing", contract.StateCatalog, "x") {
+		t.Fatal("Reclassify accepted an unknown hash")
+	}
+}
+
 func TestParseSources(t *testing.T) {
 	t.Run("plain", func(t *testing.T) {
 		data := []byte("# comment\n" + linkOne + "\nnot-a-link\n")

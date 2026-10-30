@@ -290,6 +290,31 @@ func (s *Store) Mark(hash string, state contract.EntryState, res contract.Result
 	entry.Updated = time.Now().UTC()
 }
 
+// Reclassify changes only the lifecycle state of an entry, preserving its last
+// result, score, and attempt count. It is used when an entry stops being ready
+// for a policy reason (for example, ready-pool admission) rather than a
+// qualification failure. A non-empty reason replaces the stored result reason so
+// the panel explains the state change; an empty reason leaves the last result
+// untouched. The updated time is refreshed so Pending can reconsider the entry.
+// Reclassifying an unknown hash is a no-op and returns false.
+func (s *Store) Reclassify(hash string, state contract.EntryState, reason string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.entries[hash]
+	if !ok {
+		return false
+	}
+	entry.State = state
+	if reason != "" {
+		entry.Last.Reason = reason
+	}
+	entry.Updated = time.Now().UTC()
+	return true
+}
+
 // Stats returns the number of entries, the number that are not unsupported,
 // and the number currently marked testing.
 func (s *Store) Stats() (total, supported, testing int) {

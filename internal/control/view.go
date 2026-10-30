@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"dissident/internal/contract"
+	"dissident/internal/provider"
 )
 
 const (
@@ -333,6 +334,8 @@ type readyRow struct {
 	Name       string
 	ServerPort string
 	Protocol   string
+	Provider   string
+	Domain     string
 	Score      string
 	LastCheck  string
 	ExitIP     string
@@ -359,10 +362,16 @@ func readyRows(ready []contract.Ready, limit int, canRemove bool) []readyRow {
 	rows := make([]readyRow, 0, len(sorted))
 	for _, r := range sorted {
 		prefix := hashPrefix(r.Link.Hash)
+		domain := provider.PrefixKey(r.Link)
+		if domain == "" {
+			domain = "-"
+		}
 		rows = append(rows, readyRow{
 			Name:       displayName(r.Link),
 			ServerPort: hostPort(r.Link),
 			Protocol:   protocolLabel(r.Link.Protocol),
+			Provider:   string(provider.ClassifyLink(r.Link)),
+			Domain:     domain,
 			Score:      formatScore(r.Score),
 			LastCheck:  fmtTime(r.LastCheck),
 			ExitIP:     displayOptional(r.ExitIP),
@@ -371,6 +380,21 @@ func readyRows(ready []contract.Ready, limit int, canRemove bool) []readyRow {
 		})
 	}
 	return rows
+}
+
+// diversityView returns provider counts derived from the current ready list.
+// Counts are always recomputed from the links so Snapshot-only panels and test
+// fakes show the same numbers as the manager. Shortfall fields come from the
+// runtime snapshot because only the manager knows about reserve attempts.
+func diversityView(snap contract.Snapshot) contract.Diversity {
+	counts := provider.Summarize(snap.Ready)
+	d := snap.Diversity
+	d.ReadyCloudflare = counts.Cloudflare
+	d.ReadyNonCloudflare = counts.NonCloudflare
+	d.ReadyUnknown = counts.Unknown
+	d.ReadyDomains = counts.Domains
+	d.SingleProvider = counts.SingleProvider
+	return d
 }
 
 type testRow struct {

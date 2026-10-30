@@ -82,10 +82,18 @@ type Entry struct {
 
 // Ready is a qualified standby link available for promotion.
 type Ready struct {
-	Link      Link
-	Score     float64
+	Link  Link
+	Score float64
+	// LastCheck is refreshed by cheap ready liveness. It proves only that the
+	// endpoint accepted a TCP connection recently, not that it still passes
+	// the full qualification pipeline.
 	LastCheck time.Time
-	ExitIP    string
+	// TestedAt records when this entry last passed the full qualification
+	// pipeline. It is set only on admission from a full Test pass and is never
+	// refreshed by ready liveness or score updates. Promotion may trust it
+	// within a short freshness window and skip the expensive re-test.
+	TestedAt time.Time
+	ExitIP   string
 }
 
 // Active is the single WAN currently serving traffic.
@@ -97,6 +105,26 @@ type Active struct {
 	LocalPort int
 }
 
+// Diversity summarizes the provider and failure-domain mix of the ready pool.
+// Counts are best-effort: the classifier uses published Cloudflare IPv4 ranges
+// and never resolves hostnames or consults an ASN database.
+type Diversity struct {
+	ReadyCloudflare    int
+	ReadyNonCloudflare int
+	ReadyUnknown       int
+	ReadyDomains       int
+	// SingleProvider is true when every ready entry is a known provider class
+	// and all of them are the same.
+	SingleProvider bool
+	// Shortfall reports that the most recent diversity reserve attempt finished
+	// without a non-Cloudflare standby.
+	Shortfall bool
+	// ShortfallEvents counts completed reserve attempts that found no qualifying
+	// non-Cloudflare standby. It resets on process restart.
+	ShortfallEvents uint64
+	LastShortfall   time.Time
+}
+
 // Snapshot is the immutable runtime view served to the control plane.
 type Snapshot struct {
 	Generation     uint64
@@ -105,6 +133,7 @@ type Snapshot struct {
 	CatalogCount   int
 	SupportedCount int
 	Testing        int
+	Diversity      Diversity
 	Updated        time.Time
 }
 

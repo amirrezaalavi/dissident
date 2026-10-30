@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"dissident/internal/config"
@@ -34,6 +35,12 @@ const (
 	defaultContentMinBytes = 4096
 	defaultContentQuorum   = 3
 	stopXrayTimeout        = 6 * time.Second
+	// Trusted promotion repeats only a single verify. A transient timeout or
+	// reset on that probe must not discard a candidate that passed the full
+	// pipeline seconds ago, so the verify is retried a small, bounded number of
+	// times on the same already-started xray process.
+	trustedVerifyAttempts = 3
+	trustedVerifyBackoff  = 300 * time.Millisecond
 )
 
 // Options configures a Tester. Zero timeouts and limits fall back to the
@@ -51,8 +58,11 @@ type Options struct {
 // Tester runs qualification stages. It holds only immutable configuration
 // after New, so concurrent Test calls are safe. The cheap, real, and speed
 // semaphores enforce test.cheap_workers, test.real_workers, and one serialized
-// speed transfer. portMu serializes free-port allocation plus xray startup so
-// concurrent deep tests cannot race for the same loopback port.
+// speed transfer. promoteSem is a dedicated capacity-1 slot for promotion so a
+// promotion never waits behind all real_workers deep tests; at most one
+// promotion runs at a time, while the cycle keeps using realSem. portMu
+// serializes free-port allocation plus xray startup so concurrent deep tests
+// cannot race for the same loopback port.
 type Tester struct {
 	test        config.TestConfig
 	urls        config.URLsConfig
@@ -63,11 +73,16 @@ type Tester struct {
 	egressDial  func(context.Context, string, string) (net.Conn, error)
 	egressErr   error
 	dialFn      func(context.Context, string, string) (net.Conn, error)
+	// trustedVerify is the trusted-promotion verify seam. Nil uses the real
+	// SOCKS verify; tests replace it to exercise transient-failure retries
+	// without a live upstream.
+	trustedVerify func(context.Context, string) error
 
-	cheapSem chan struct{}
-	realSem  chan struct{}
-	speedSem chan struct{}
-	portMu   sync.Mutex
+	cheapSem   chan struct{}
+	realSem    chan struct{}
+	speedSem   chan struct{}
+	promoteSem chan struct{}
+	portMu     sync.Mutex
 }
 
 // New builds a Tester, applying defaults for unset bounds and constructing
@@ -88,6 +103,7 @@ func New(opts Options) *Tester {
 		cheapSem:    make(chan struct{}, test.CheapWorkers),
 		realSem:     make(chan struct{}, test.RealWorkers),
 		speedSem:    make(chan struct{}, 1),
+		promoteSem:  make(chan struct{}, 1),
 	}
 	if tester.egressProxy != "" {
 		dial, err := platform.NewEgressDialer(tester.egressProxy, test.TCPTimeout)
@@ -361,8 +377,32 @@ func (t *Tester) Test(ctx context.Context, link contract.Link) contract.Result {
 // optionally measures speed/TTFB. On success the caller owns the returned
 // process; on any failure the process is stopped and an error returned.
 func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Result, *platform.Xray, error) {
+	return t.promote(ctx, link, true)
+}
+
+// PromoteTrusted is the promotion path for a ready entry whose full Test pass
+// is still fresh. It repeats only the steps that must be re-established for a
+// new process: static support, credential validation, render, xray start, and
+// one 2xx verify through the local SOCKS endpoint. Upload, HTTP/2, speed,
+// content, and stability are deliberately skipped because the full Test that
+// admitted the entry already proved them. On success the caller owns the
+// returned process; on any failure the process is stopped and an error
+// returned.
+func (t *Tester) PromoteTrusted(ctx context.Context, link contract.Link) (contract.Result, *platform.Xray, error) {
+	return t.promote(ctx, link, false)
+}
+
+// promote implements both promotion modes. full selects the original strict
+// pipeline; otherwise only render, start, and one verify run. Promotion takes
+// the dedicated capacity-1 promoteSem, never realSem: a cycle holding every
+// real_workers slot must not starve a promotion into a context deadline.
+func (t *Tester) promote(ctx context.Context, link contract.Link, full bool) (contract.Result, *platform.Xray, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	mode := "trusted"
+	if full {
+		mode = "full"
 	}
 	result := contract.Result{Hash: link.Hash, At: time.Now().UTC()}
 	fail := func(stage contract.Stage, format string, args ...any) (contract.Result, *platform.Xray, error) {
@@ -370,7 +410,7 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 		result.OK = false
 		result.Reason = fmt.Sprintf(format, args...)
 		result.At = time.Now().UTC()
-		t.log.Debug("promotion failed", "hash", link.Hash, "stage", stage, "reason", result.Reason)
+		t.log.Debug("promotion failed", "hash", link.Hash, "stage", stage, "mode", mode, "reason", result.Reason)
 		return result, nil, errors.New(result.Reason)
 	}
 
@@ -380,10 +420,10 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 	if err := validateProtocol(link); err != nil {
 		return fail(contract.StageProtocol, "protocol: %s", detailOf(err))
 	}
-	if err := t.acquire(ctx, t.realSem); err != nil {
+	if err := t.acquire(ctx, t.promoteSem); err != nil {
 		return fail(contract.StageReal, "real: %s", detailOf(err))
 	}
-	defer t.release(t.realSem)
+	defer t.release(t.promoteSem)
 
 	t.portMu.Lock()
 	port, err := platform.FreePort()
@@ -411,16 +451,36 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 	}()
 
 	socksAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(xray.Port))
-	client := t.httpClient(socksAddr)
-	defer client.CloseIdleConnections()
 
-	verified, err := t.verifyAny(ctx, client, maxRealBody)
-	if err != nil {
-		return fail(contract.StageReal, "real: %s", detailOf(err))
+	var verified fetchResult
+	if full {
+		client := t.httpClient(socksAddr)
+		defer client.CloseIdleConnections()
+		verified, err = t.verifyAny(ctx, client, maxRealBody)
+		if err != nil {
+			return fail(contract.StageReal, "real: %s", detailOf(err))
+		}
+	} else {
+		verified, err = t.verifyTrusted(ctx, link.Hash, socksAddr)
+		if err != nil {
+			return fail(contract.StageReal, "real: %s", detailOf(err))
+		}
 	}
 	result.TTFB = verified.TTFB
 	result.HTTPStatus = verified.Status
 	result.Bytes = verified.Bytes
+
+	if !full {
+		// The full Test already proved upload, HTTP/2, content, speed, and
+		// stability. A fresh ready entry only needs a working SOCKS path.
+		result.Stage = contract.StageReal
+		result.OK = true
+		result.Reason = "ok"
+		result.At = time.Now().UTC()
+		success = true
+		t.log.Debug("promotion passed", "hash", link.Hash, "port", xray.Port, "mode", mode)
+		return result, xray, nil
+	}
 
 	if err := t.Upload(ctx, socksAddr); err != nil {
 		return fail(contract.StageReal, "upload: %s", detailOf(err))
@@ -454,8 +514,98 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 	result.Reason = "ok"
 	result.At = time.Now().UTC()
 	success = true
-	t.log.Debug("promotion passed", "hash", link.Hash, "port", xray.Port)
+	t.log.Debug("promotion passed", "hash", link.Hash, "port", xray.Port, "mode", mode)
 	return result, xray, nil
+}
+
+// verifyTrusted performs the trusted promotion's 2xx check with a small
+// bounded retry for transient transport failures. It deliberately reuses the
+// already-started xray process: the process itself started successfully, only
+// the probe failed, and restarting xray would churn a port/PID without adding
+// evidence. Each attempt uses a fresh HTTP client so a broken pooled
+// connection cannot poison the retry.
+//
+// Permanent failures (non-2xx, bad URL, missing configuration) are not
+// retried. Every attempt is still bounded by test.http_timeout inside get; the
+// caller's promotion context remains the overall cap.
+func (t *Tester) verifyTrusted(ctx context.Context, hash, socksAddr string) (fetchResult, error) {
+	attempt := func() (fetchResult, error) {
+		if t.trustedVerify != nil {
+			return fetchResult{}, t.trustedVerify(ctx, socksAddr)
+		}
+		client := t.httpClient(socksAddr)
+		defer client.CloseIdleConnections()
+		return t.verifyAny(ctx, client, maxRealBody)
+	}
+
+	for n := 1; ; n++ {
+		result, err := attempt()
+		if err == nil {
+			return result, nil
+		}
+		transient := isTransientVerifyError(err)
+		if !transient {
+			t.log.Debug("trusted promotion verify failed permanently",
+				"hash", hash, "attempt", n, "err", err)
+			return fetchResult{}, err
+		}
+		if n >= trustedVerifyAttempts || ctx.Err() != nil {
+			t.log.Warn("trusted promotion verify failed after retries",
+				"hash", hash, "attempt", n, "attempts", trustedVerifyAttempts, "err", err)
+			return fetchResult{}, err
+		}
+		t.log.Warn("trusted promotion verify failed; retrying",
+			"hash", hash, "attempt", n, "attempts", trustedVerifyAttempts,
+			"backoff", trustedVerifyBackoff, "err", err)
+		timer := time.NewTimer(trustedVerifyBackoff)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return fetchResult{}, err
+		}
+	}
+}
+
+// isTransientVerifyError reports whether a verify failure is worth retrying.
+// Static support/render/start errors never reach this function; within a
+// verify, only transport symptoms are transient. A non-2xx response is a
+// deterministic answer and is not retried.
+func isTransientVerifyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"context deadline exceeded",
+		"i/o timeout",
+		"tls handshake timeout",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+		"eof",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // tcpCheck dials the link server and records the TCP round-trip time.

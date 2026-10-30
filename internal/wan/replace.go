@@ -44,11 +44,7 @@ func (m *Manager) Replace(ctx context.Context) error {
 	}
 	sortReady(candidates)
 
-	cfg := m.currentConfig()
-	promotionTimeout := cfg.Swap.PromotionTimeout
-	if promotionTimeout <= 0 {
-		promotionTimeout = 15 * time.Second
-	}
+	promotionTimeout := m.promotionTimeout()
 
 	var lastErr error
 	for _, cand := range candidates {
@@ -71,11 +67,11 @@ func (m *Manager) Replace(ctx context.Context) error {
 			continue
 		}
 
-		p, err := m.promotedOrVerified(ctx, cand.Link, promotionTimeout)
+		p, mode, err := m.promoteCandidate(ctx, cand, promotionTimeout)
 		if err != nil {
 			lastErr = err
-			m.logger.Warn("wan: promotion failed after verification fallback",
-				"hash", cand.Link.Hash, "err", err)
+			m.logger.Warn("wan: promotion failed",
+				"hash", cand.Link.Hash, "promotion_mode", mode, "err", err)
 			m.dropReady(cand.Link, contract.Result{
 				Hash: cand.Link.Hash, Stage: contract.StageReal, OK: false,
 				Reason: err.Error(), At: m.now().UTC(),
@@ -95,7 +91,7 @@ func (m *Manager) Replace(ctx context.Context) error {
 			}
 			continue
 		}
-		m.logger.Info("wan: replaced active", "hash", cand.Link.Hash, "port", p.Port())
+		m.logger.Info("wan: replaced active", "hash", cand.Link.Hash, "port", p.Port(), "promotion_mode", mode)
 		return nil
 	}
 
@@ -167,11 +163,8 @@ func (m *Manager) promoteReady(ctx context.Context, cand contract.Ready) (bool, 
 	if m.hasActive() {
 		return false, nil
 	}
-	promotionTimeout := m.currentConfig().Swap.PromotionTimeout
-	if promotionTimeout <= 0 {
-		promotionTimeout = 15 * time.Second
-	}
-	p, err := m.promotedOrVerified(ctx, cand.Link, promotionTimeout)
+	promotionTimeout := m.promotionTimeout()
+	p, mode, err := m.promoteCandidate(ctx, cand, promotionTimeout)
 	if err != nil {
 		return false, err
 	}
@@ -179,7 +172,44 @@ func (m *Manager) promoteReady(ctx context.Context, cand contract.Ready) (bool, 
 		_ = m.stopProcess(context.Background(), p)
 		return false, err
 	}
+	m.logger.Info("wan: promoted cycle candidate",
+		"hash", cand.Link.Hash, "port", p.Port(), "promotion_mode", mode)
 	return true, nil
+}
+
+// promoteCandidate starts one ready candidate with the cheapest path its
+// evidence allows. A ready entry whose full Test pass is still inside the
+// trust window uses the trusted path (render/start/verify only). A zero or
+// stale TestedAt, including entries loaded from older state, keeps the
+// original full promotion plus its degraded verification fallback.
+//
+// A trusted failure is returned as-is. The caller drops the candidate for this
+// attempt and must not fall back to the full pipeline: a link that cannot
+// satisfy render/start/verify now is not a safe install even if it passed a
+// heavier test minutes ago.
+func (m *Manager) promoteCandidate(ctx context.Context, cand contract.Ready,
+	timeout time.Duration) (process, string, error) {
+	if m.trustedPromotion(cand) {
+		m.logger.Info("wan: promoting ready candidate",
+			"hash", cand.Link.Hash, "promotion_mode", "trusted", "tested_at", cand.TestedAt)
+		p, err := m.restoreAttempt(ctx, cand.Link, timeout, m.startTrusted)
+		return p, "trusted", err
+	}
+	m.logger.Info("wan: promoting ready candidate",
+		"hash", cand.Link.Hash, "promotion_mode", "full", "tested_at", cand.TestedAt)
+	p, err := m.promotedOrVerified(ctx, cand.Link, timeout)
+	return p, "full", err
+}
+
+// trustedPromotion reports whether cand's full-Test evidence is fresh enough
+// to skip the expensive promotion stages. A future timestamp (clock moved
+// backwards) is treated as untrusted rather than trusted indefinitely.
+func (m *Manager) trustedPromotion(cand contract.Ready) bool {
+	if cand.TestedAt.IsZero() {
+		return false
+	}
+	age := m.now().Sub(cand.TestedAt)
+	return age >= 0 && age <= promotionTrustWindow
 }
 
 // scheduleDrain keeps the old process alive for the configured drain timeout so
@@ -311,4 +341,14 @@ func (m *Manager) markCatalog(hash string, state contract.EntryState, res contra
 		return
 	}
 	m.catalog.Mark(hash, state, res)
+}
+
+// markCatalogState changes only the catalog lifecycle state. It is used for
+// policy evictions, where the entry did not fail and its last result/score must
+// be preserved so the entry can be reconsidered later.
+func (m *Manager) markCatalogState(hash string, state contract.EntryState, reason string) {
+	if m.catalog == nil || hash == "" {
+		return
+	}
+	m.catalog.Reclassify(hash, state, reason)
 }

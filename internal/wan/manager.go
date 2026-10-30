@@ -59,6 +59,21 @@ const (
 	speedLivenessInterval = 5 * time.Minute
 	// speedLivenessTimeout bounds the 1 MB speed probe.
 	speedLivenessTimeout = 30 * time.Second
+	// startupPromotionTimeout is the bounded budget for one promotion attempt
+	// when no active WAN exists. The proxy is failing closed in that state, so
+	// xray start plus verify may legitimately take longer than the 15s
+	// make-before-break budget. It stays bounded so a dead candidate cannot hold
+	// replaceMu forever.
+	startupPromotionTimeout = 30 * time.Second
+	// promotionTrustWindow is how long a full-Test pass remains trustworthy
+	// for the lightweight promotion path. A candidate normally reaches
+	// promotion seconds after Test (the cycle promotes its first pass
+	// immediately), so the window only has to cover scheduler latency, a
+	// replacement triggered shortly after a test, and a quick restart. Eight
+	// minutes spans several ready_liveness ticks (100s by default) without
+	// surviving a full 30-minute cycle: a standby that waited that long may
+	// have degraded and deserves the full pipeline again.
+	promotionTrustWindow = 8 * time.Minute
 )
 
 var (
@@ -162,16 +177,22 @@ type Manager struct {
 	nextPassiveReplaceAt time.Time
 	passiveGrace         time.Duration
 	passiveCooldown      time.Duration
-	cycleCancel          context.CancelFunc
-	launchCtx            context.Context
-	cancel               context.CancelFunc
-	started              bool
-	stopping             bool
-	stopped              bool
-	draining             map[int]process
-	nextDrainID          int
-	probeTokens          float64
-	probeTokensAt        time.Time
+	// diversityShortfall is set after a reserve attempt that produced no
+	// non-Cloudflare standby. The counter and timestamp survive until restart
+	// (they are deliberately not part of the persisted state format).
+	diversityShortfall       bool
+	diversityShortfallEvents uint64
+	lastDiversityShortfall   time.Time
+	cycleCancel              context.CancelFunc
+	launchCtx                context.Context
+	cancel                   context.CancelFunc
+	started                  bool
+	stopping                 bool
+	stopped                  bool
+	draining                 map[int]process
+	nextDrainID              int
+	probeTokens              float64
+	probeTokensAt            time.Time
 
 	cycling   atomic.Bool
 	replaceMu sync.Mutex
@@ -186,6 +207,7 @@ type Manager struct {
 	// Function fields exist so Replace, liveness, restore fallback, and
 	// persistence can be exercised without a real xray process or network.
 	startPromoted func(context.Context, contract.Link) (process, error)
+	startTrusted  func(context.Context, contract.Link) (process, error)
 	startVerified func(context.Context, contract.Link) (process, error)
 	stopProcess   func(context.Context, process) error
 	probe         func(context.Context, string) error
@@ -229,6 +251,7 @@ func New(opts Options) *Manager {
 		}
 	}
 	m.startPromoted = m.startWithTester
+	m.startTrusted = m.startTrustedWithTester
 	m.startVerified = m.verificationRestore
 	m.stopProcess = func(ctx context.Context, p process) error { return p.Stop(ctx) }
 	m.probe = m.probeWithTester
@@ -248,6 +271,22 @@ func (m *Manager) currentConfig() config.Config {
 		}
 	}
 	return config.Defaults()
+}
+
+// promotionTimeout returns the bounded budget for one candidate attempt.
+// Replacing a live active keeps the configured make-before-break timeout: the
+// old route is still serving, so a slow candidate may be abandoned. With no
+// active WAN the proxy is failing closed, so use a longer but still bounded
+// startup budget for engine start plus verify.
+func (m *Manager) promotionTimeout() time.Duration {
+	timeout := m.currentConfig().Swap.PromotionTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	if !m.hasActive() && timeout < startupPromotionTimeout {
+		return startupPromotionTimeout
+	}
+	return timeout
 }
 
 func (m *Manager) generation() uint64 {
@@ -270,6 +309,26 @@ func (m *Manager) startWithTester(ctx context.Context, link contract.Link) (proc
 		return nil, err
 	} else if x == nil {
 		return nil, errors.New("wan: promote returned no xray process")
+	} else {
+		return &platformProcess{x: x}, nil
+	}
+}
+
+// startTrustedWithTester is the fast promotion path for a ready entry whose
+// full Test pass is still inside promotionTrustWindow. It renders and starts
+// xray and requires one 2xx verify; it never re-runs upload, HTTP/2, speed,
+// content, or stability.
+func (m *Manager) startTrustedWithTester(ctx context.Context, link contract.Link) (process, error) {
+	if m.tester == nil {
+		return nil, errors.New("wan: qualify tester is not configured")
+	}
+	if _, x, err := m.tester.PromoteTrusted(ctx, link); err != nil {
+		if x != nil {
+			_ = x.Stop(context.Background())
+		}
+		return nil, err
+	} else if x == nil {
+		return nil, errors.New("wan: trusted promote returned no xray process")
 	} else {
 		return &platformProcess{x: x}, nil
 	}
@@ -399,10 +458,7 @@ func (m *Manager) restoreActive(ctx context.Context, pa contract.Active) error {
 	if err := xraycfg.Supports(pa.Link); err != nil {
 		return fmt.Errorf("unsupported active link: %w", err)
 	}
-	timeout := m.currentConfig().Swap.PromotionTimeout
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
+	timeout := m.promotionTimeout()
 	p, err := m.promotedOrVerified(ctx, pa.Link, timeout)
 	if err != nil {
 		return fmt.Errorf("wan: restore active: %w", err)
@@ -634,6 +690,9 @@ func (m *Manager) Snapshot() contract.Snapshot {
 		active = &meta
 	}
 	ready := cloneReady(m.ready)
+	shortfall := m.diversityShortfall
+	shortfallEvents := m.diversityShortfallEvents
+	lastShortfall := m.lastDiversityShortfall
 	m.mu.Unlock()
 
 	total, supported, testing := 0, 0, 0
@@ -647,6 +706,7 @@ func (m *Manager) Snapshot() contract.Snapshot {
 		CatalogCount:   total,
 		SupportedCount: supported,
 		Testing:        testing,
+		Diversity:      diversityStats(ready, shortfall, shortfallEvents, lastShortfall),
 		Updated:        m.now().UTC(),
 	}
 }
@@ -855,11 +915,10 @@ func (m *Manager) triggerReplace(reason string) {
 }
 
 func (m *Manager) replaceBudget() time.Duration {
-	cfg := m.currentConfig()
-	promo := cfg.Swap.PromotionTimeout
-	if promo <= 0 {
-		promo = 15 * time.Second
-	}
+	// Match the per-candidate budget used by Replace. While no active WAN
+	// exists that is the longer startup budget, and the enclosing asynchronous
+	// context must not cut it short.
+	promo := m.promotionTimeout()
 	m.mu.Lock()
 	n := len(m.ready)
 	m.mu.Unlock()
