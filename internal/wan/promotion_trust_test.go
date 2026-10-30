@@ -193,6 +193,42 @@ func TestCycleTrustedFailureDoesNotInstallOrFallBack(t *testing.T) {
 	}
 }
 
+func TestPromotionTimeoutIsLongerOnlyWithoutActive(t *testing.T) {
+	m, _, _ := testManager(t, func(c *config.Config) {
+		c.Swap.PromotionTimeout = 15 * time.Second
+	})
+	if got := m.promotionTimeout(); got != startupPromotionTimeout {
+		t.Fatalf("no-active promotion timeout = %v, want %v", got, startupPromotionTimeout)
+	}
+	if got := m.replaceBudget(); got != startupPromotionTimeout+5*time.Second {
+		t.Fatalf("no-active replace budget = %v, want startup budget plus overhead", got)
+	}
+
+	setActive(t, m, testLink("active-timeout"), 28510)
+	if got := m.promotionTimeout(); got != 15*time.Second {
+		t.Fatalf("active promotion timeout = %v, want configured 15s", got)
+	}
+	if got := m.replaceBudget(); got != 20*time.Second {
+		t.Fatalf("active replace budget = %v, want 20s", got)
+	}
+
+	// An explicitly longer configured budget wins in both states.
+	cfg := m.currentConfig()
+	cfg.Swap.PromotionTimeout = 45 * time.Second
+	if err := m.config.Apply(cfg); err != nil {
+		t.Fatalf("apply config: %v", err)
+	}
+	if got := m.promotionTimeout(); got != 45*time.Second {
+		t.Fatalf("active custom promotion timeout = %v, want 45s", got)
+	}
+	m.mu.Lock()
+	m.active = nil
+	m.mu.Unlock()
+	if got := m.promotionTimeout(); got != 45*time.Second {
+		t.Fatalf("no-active custom promotion timeout = %v, want 45s", got)
+	}
+}
+
 func TestTestedAtSurvivesStateAndIsNotRefreshedByLiveness(t *testing.T) {
 	m, _, store := testManager(t, func(c *config.Config) {
 		c.Cycle.ReadyMin = 1

@@ -395,7 +395,11 @@ skipping upload/HTTP-2/speed/content/stability because the full Test already pro
 That verify is retried up to three total attempts with a 300 ms backoff on transient
 transport failures (timeout, EOF, reset, TLS handshake timeout, deadline), reusing the
 same started xray process. Non-2xx responses and static support/render/start failures are
-never retried.
+never retried. Both promotion modes take a dedicated capacity-1 promotion semaphore
+instead of `real_workers`, so all deep-test slots can be busy without starving a
+promotion; at peak this allows one extra xray child over `real_workers` plus the active.
+With no active WAN, one promotion attempt uses a bounded 30s startup budget instead of the
+15s `swap.promotion_timeout`; replacing a live active keeps the configured timeout.
 `Verify` and `Probe` follow redirects and require a 2xx. `Speed` reads exactly
 `test.speed_size` bytes, tries `urls.speed` then `urls.speed_fallback` on transport
 errors or non-2xx, and returns Mbps = bytes*8/elapsed/1e6.
@@ -432,7 +436,10 @@ Manager invariants:
 - exactly one active xray process; ready entries are metadata only
 - Route returns the current active process's SOCKS5 dialer (implements proxy.Dialer)
 - replacement is make-before-break: start/verify candidate, atomically swap, keep the old
-  process alive for `swap.drain_timeout` so in-flight connections finish, then stop it
+  process alive for `swap.drain_timeout` so in-flight connections finish, then stop it;
+  while no active WAN exists a candidate attempt gets a bounded 30s startup budget
+- promotion has its own capacity-1 slot, so a cycle that fills every `real_workers` deep
+  test slot cannot starve it until the promotion context expires
 - three passive failures for the active route within `cycle.probe_window` trigger one
   asynchronous Replace; failure reports must not block the proxy
 - liveness probes every `cycle.active_liveness`; 3 failed probes in the window replace

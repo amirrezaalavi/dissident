@@ -59,6 +59,12 @@ const (
 	speedLivenessInterval = 5 * time.Minute
 	// speedLivenessTimeout bounds the 1 MB speed probe.
 	speedLivenessTimeout = 30 * time.Second
+	// startupPromotionTimeout is the bounded budget for one promotion attempt
+	// when no active WAN exists. The proxy is failing closed in that state, so
+	// xray start plus verify may legitimately take longer than the 15s
+	// make-before-break budget. It stays bounded so a dead candidate cannot hold
+	// replaceMu forever.
+	startupPromotionTimeout = 30 * time.Second
 	// promotionTrustWindow is how long a full-Test pass remains trustworthy
 	// for the lightweight promotion path. A candidate normally reaches
 	// promotion seconds after Test (the cycle promotes its first pass
@@ -267,6 +273,22 @@ func (m *Manager) currentConfig() config.Config {
 	return config.Defaults()
 }
 
+// promotionTimeout returns the bounded budget for one candidate attempt.
+// Replacing a live active keeps the configured make-before-break timeout: the
+// old route is still serving, so a slow candidate may be abandoned. With no
+// active WAN the proxy is failing closed, so use a longer but still bounded
+// startup budget for engine start plus verify.
+func (m *Manager) promotionTimeout() time.Duration {
+	timeout := m.currentConfig().Swap.PromotionTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	if !m.hasActive() && timeout < startupPromotionTimeout {
+		return startupPromotionTimeout
+	}
+	return timeout
+}
+
 func (m *Manager) generation() uint64 {
 	if m.config != nil {
 		if cur := m.config.Current(); cur != nil {
@@ -436,10 +458,7 @@ func (m *Manager) restoreActive(ctx context.Context, pa contract.Active) error {
 	if err := xraycfg.Supports(pa.Link); err != nil {
 		return fmt.Errorf("unsupported active link: %w", err)
 	}
-	timeout := m.currentConfig().Swap.PromotionTimeout
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
+	timeout := m.promotionTimeout()
 	p, err := m.promotedOrVerified(ctx, pa.Link, timeout)
 	if err != nil {
 		return fmt.Errorf("wan: restore active: %w", err)
@@ -896,11 +915,10 @@ func (m *Manager) triggerReplace(reason string) {
 }
 
 func (m *Manager) replaceBudget() time.Duration {
-	cfg := m.currentConfig()
-	promo := cfg.Swap.PromotionTimeout
-	if promo <= 0 {
-		promo = 15 * time.Second
-	}
+	// Match the per-candidate budget used by Replace. While no active WAN
+	// exists that is the longer startup budget, and the enclosing asynchronous
+	// context must not cut it short.
+	promo := m.promotionTimeout()
 	m.mu.Lock()
 	n := len(m.ready)
 	m.mu.Unlock()
