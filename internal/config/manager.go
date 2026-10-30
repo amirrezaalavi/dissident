@@ -29,6 +29,7 @@ type Manager struct {
 
 // NewManager validates cfg and publishes it as generation 1.
 func NewManager(cfg Config) (*Manager, error) {
+	cfg.normalizeURLs()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -53,6 +54,7 @@ func (m *Manager) Apply(cfg Config) error {
 		return errors.New("config: nil manager")
 	}
 	next := cfg.Clone()
+	next.normalizeURLs()
 	if err := next.Validate(); err != nil {
 		return err
 	}

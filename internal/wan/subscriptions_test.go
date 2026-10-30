@@ -96,8 +96,17 @@ func TestAddAndRemoveSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat urls dir: %v", err)
 	}
-	if mode := dirInfo.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o755 {
-		t.Fatalf("urls dir mode = %o, want 755", mode)
+	// MkdirAll(0755) is filtered by the process umask, so assert the effective
+	// mode: the owner must have full access and no permission may exceed 0755.
+	// This keeps the test independent of the umask (the CI default is 022,
+	// while sandboxes often use 077).
+	if mode := dirInfo.Mode().Perm(); runtime.GOOS != "windows" {
+		if mode&0o700 != 0o700 {
+			t.Fatalf("urls dir mode = %o, owner lacks read/write/execute", mode)
+		}
+		if mode&^os.FileMode(0o755) != 0 {
+			t.Fatalf("urls dir mode = %o, exceeds the requested 0755", mode)
+		}
 	}
 
 	data, err := os.ReadFile(path)

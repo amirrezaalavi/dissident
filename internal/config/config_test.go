@@ -132,6 +132,81 @@ access = false
 	}
 }
 
+func TestLoadSanitizesTrailingURLArtifacts(t *testing.T) {
+	body := `
+[urls]
+probe = https://probe.example/, https://probe2.example/\
+verify = "https://verify.example/" , https://verify2.example/\ 
+content = https://www.youtube.com/, https://www.youtube.com/\, "https://www.youtube.com/", https://example.com/some/path
+speed = https://speed.example/file\
+speed_fallback = https://fallback.example/file/
+upload = "https://upload.example/"
+http2 = "https://www.youtube.com/\"
+exit_ip = https://api.ipify.org/
+`
+	cfg, err := Load(writeTempConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// A legitimate trailing slash must survive unchanged.
+	if got := cfg.URLs.HTTP2; got != "https://www.youtube.com/" {
+		t.Errorf("http2 = %q, want the trailing slash preserved", got)
+	}
+	if got := cfg.URLs.ExitIP; got != "https://api.ipify.org/" {
+		t.Errorf("exit_ip = %q, want the trailing slash preserved", got)
+	}
+	if got := cfg.URLs.SpeedFallback; got != "https://fallback.example/file/" {
+		t.Errorf("speed_fallback = %q, want the trailing slash preserved", got)
+	}
+	if got := cfg.URLs.Upload; got != "https://upload.example/" {
+		t.Errorf("upload = %q, want quotes removed and slash preserved", got)
+	}
+
+	// A pasted trailing backslash must be removed without touching the slash.
+	if got := cfg.URLs.Speed; got != "https://speed.example/file" {
+		t.Errorf("speed = %q, want trailing backslash removed", got)
+	}
+	if got := cfg.URLs.Probe; len(got) != 2 || got[0] != "https://probe.example/" || got[1] != "https://probe2.example/" {
+		t.Errorf("probe = %q, want sanitized list entries", got)
+	}
+	if got := cfg.URLs.Verify; len(got) != 2 || got[0] != "https://verify.example/" || got[1] != "https://verify2.example/" {
+		t.Errorf("verify = %q, want quoted/suffixed entries sanitized", got)
+	}
+	wantContent := []string{
+		"https://www.youtube.com/",
+		"https://www.youtube.com/",
+		"https://www.youtube.com/",
+		"https://example.com/some/path",
+	}
+	if got := cfg.URLs.Content; len(got) != len(wantContent) {
+		t.Errorf("content = %q, want %q", got, wantContent)
+	} else {
+		for i := range wantContent {
+			if got[i] != wantContent[i] {
+				t.Errorf("content[%d] = %q, want %q", i, got[i], wantContent[i])
+			}
+		}
+	}
+}
+
+func TestManagerNormalizesProgrammaticURLs(t *testing.T) {
+	cfg := Defaults()
+	cfg.URLs.HTTP2 = `https://www.youtube.com/\`
+	cfg.URLs.Probe = []string{" https://probe.example/\\ "}
+	manager, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	cur := manager.Current()
+	if got := cur.Config.URLs.HTTP2; got != "https://www.youtube.com/" {
+		t.Errorf("http2 = %q, want sanitized at Manager boundary", got)
+	}
+	if got := cur.Config.URLs.Probe[0]; got != "https://probe.example/" {
+		t.Errorf("probe[0] = %q, want sanitized at Manager boundary", got)
+	}
+}
+
 func TestLoadUnknownKey(t *testing.T) {
 	body := "[server]\npanel_listen = 127.0.0.1:8090\nnope = true\n"
 	_, err := Load(writeTempConfig(t, body))
