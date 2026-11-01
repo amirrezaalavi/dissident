@@ -267,6 +267,40 @@ func (s *Store) Pending(limit int) []contract.Entry {
 	return out
 }
 
+// PendingNewest returns entries that still need qualification (catalog or
+// failed), ordered by most recently Updated first, then by last TCP latency
+// ascending (zero treated as the lowest hint so freshly merged entries stay
+// near the front), then by hash. A limit of zero or less returns every pending
+// entry. Like Pending, it clones entries under the read lock.
+func (s *Store) PendingNewest(limit int) []contract.Entry {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	out := make([]contract.Entry, 0, len(s.entries))
+	for _, entry := range s.entries {
+		if entry.State == contract.StateCatalog || entry.State == contract.StateFailed {
+			out = append(out, cloneEntry(*entry))
+		}
+	}
+	s.mu.RUnlock()
+
+	sort.SliceStable(out, func(i, j int) bool {
+		left, right := out[i], out[j]
+		if !left.Updated.Equal(right.Updated) {
+			return left.Updated.After(right.Updated)
+		}
+		if left.Last.TCPLatency != right.Last.TCPLatency {
+			return left.Last.TCPLatency < right.Last.TCPLatency
+		}
+		return left.Link.Hash < right.Link.Hash
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 // Mark records the outcome of one qualification attempt. The entry keeps its
 // link; state, last result, score, attempt count, and updated time are
 // replaced. Marking an unknown hash is a no-op.

@@ -12,6 +12,13 @@ import (
 	"dissident/internal/provider"
 )
 
+const (
+	// manualCycleBatch bounds a forced/manual cycle. A manual run tests the
+	// newest pending entries even when readiness is already satisfied, so it
+	// needs its own bandwidth guard instead of the catalog-wide scheduled scan.
+	manualCycleBatch = 50
+)
+
 // RunCycle fetches configured sources, merges links into the catalog, and tests
 // pending entries in catalog order (TCP latency). It stops when there is an
 // active WAN and ready_target standbys are available, when pending entries run
@@ -20,6 +27,19 @@ import (
 // A source-fetch failure or a canceled cycle never tears down the active WAN
 // and never clears the ready list: the last-known-good runtime is preserved.
 func (m *Manager) RunCycle(ctx context.Context) error {
+	return m.runCycle(ctx, false)
+}
+
+// RunCycleNow runs a manual cycle. It fetches and merges sources like RunCycle,
+// but it ignores the ready-target short-circuit and tests the newest pending
+// entries instead of returning immediately. This is what the panel's "Run
+// cycle (test pending)" button uses: users expect a newly added subscription to
+// be probed even while the ready pool is already full.
+func (m *Manager) RunCycleNow(ctx context.Context) error {
+	return m.runCycle(ctx, true)
+}
+
+func (m *Manager) runCycle(ctx context.Context, force bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -118,7 +138,7 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		m.logger.Info("wan: cycle merged sources", "links", len(links), "added", added)
 	}
 
-	if m.hasActive() && m.readyCount() >= target {
+	if !force && m.hasActive() && m.readyCount() >= target {
 		// The ready target is met, but a Cloudflare-only pool may still be
 		// missing the provider reserve. In that case run a bounded reserve
 		// probe instead of returning early; otherwise the soft reserve could
@@ -130,7 +150,9 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	}
 
 	reserveNeeded := m.readyLacksNonCloudflare()
-	reserveOnly := reserveNeeded && m.hasActive() && m.readyCount() >= target
+	// A forced/manual run is a pending-batch probe, not a reserve-only probe:
+	// the user explicitly asked for newly added candidates to be tested.
+	reserveOnly := !force && reserveNeeded && m.hasActive() && m.readyCount() >= target
 
 	// Build one finite queue for this cycle. Failed entries inside the retry
 	// cooldown are left for a later cycle instead of being hammered by every
@@ -148,8 +170,15 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	if cooldown < 0 {
 		cooldown = 0
 	}
+	catalogPending := m.catalog.Pending(0)
+	if force {
+		// Newest entries first: a zero-latency entry merged or reclassified
+		// moments ago must not sit behind thousands of older known-latency
+		// entries in the scheduled Pending order.
+		catalogPending = m.catalog.PendingNewest(0)
+	}
 	pending := make([]contract.Entry, 0)
-	for _, entry := range m.catalog.Pending(0) {
+	for _, entry := range catalogPending {
 		if entry.Link.Hash == "" || entry.Link.Hash == activeHash {
 			continue
 		}
@@ -161,7 +190,19 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		}
 		pending = append(pending, entry)
 	}
-	queue, reserveQueued := buildCycleQueue(pending, reserveNeeded, reserveOnly, diversityReserveBatch, cfg.Test.RealTestCap)
+
+	var queue []contract.Entry
+	reserveQueued := 0
+	if force {
+		limit := forcedCycleLimit(cfg.Test.RealTestCap)
+		if len(pending) > limit {
+			pending = pending[:limit]
+		}
+		queue = pending
+		reserveQueued = countNonCloudflare(queue)
+	} else {
+		queue, reserveQueued = buildCycleQueue(pending, reserveNeeded, reserveOnly, diversityReserveBatch, cfg.Test.RealTestCap)
+	}
 
 	workers := cfg.Test.CheapWorkers
 	if workers < 2 {
@@ -183,6 +224,7 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		"target", target,
 		"provider_reserve", reserveNeeded,
 		"reserve_only", reserveOnly,
+		"forced", force,
 		"non_cloudflare_queued", reserveQueued)
 
 	type outcome struct {
@@ -209,6 +251,7 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	stop := false
 	canceled := false
 	launched := 0
+	tested := 0
 	inFlight := 0
 	nonCFTested := 0
 	for {
@@ -235,7 +278,7 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 				})
 				canceled = true
 			}
-			if m.hasActive() && m.readyCount() >= target {
+			if !force && m.hasActive() && m.readyCount() >= target {
 				stop = true
 			}
 		}
@@ -255,8 +298,12 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 			})
 			continue
 		}
+		tested++
 		m.applyCycleResult(cycleCtx, out.entry, out.res, target)
-		if m.hasActive() && m.readyCount() >= target {
+		// A forced cycle deliberately runs the whole bounded batch even after
+		// the ready target is met; otherwise it would reproduce the no-op it
+		// exists to fix.
+		if !force && m.hasActive() && m.readyCount() >= target {
 			stop = true
 		}
 	}
@@ -271,6 +318,12 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 	}
 	if canceled && cycleErr == nil {
 		cycleErr = context.Canceled
+	}
+	if force {
+		m.logger.Info("wan: manual cycle testing pending entries",
+			"queued", len(queue),
+			"tested", tested,
+			"forced", true)
 	}
 
 	_ = m.saveState()
@@ -301,6 +354,17 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		m.logger.Info("wan: cycle finished below ready_min", "ready", m.readyCount(), "ready_min", cfg.Cycle.ReadyMin)
 	}
 	return cycleErr
+}
+
+// forcedCycleLimit returns the bound for a manual cycle's test queue. The
+// manual batch keeps a click from scanning the whole catalog, while an explicit
+// test.real_test_cap still wins when it is lower.
+func forcedCycleLimit(testCap int) int {
+	limit := manualCycleBatch
+	if testCap > 0 && testCap < limit {
+		limit = testCap
+	}
+	return limit
 }
 
 // applyCycleResult installs one completed qualification result. It is called

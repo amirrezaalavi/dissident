@@ -195,6 +195,55 @@ func TestStorePendingOrdering(t *testing.T) {
 	}
 }
 
+func TestStorePendingNewestOrderingAndLimit(t *testing.T) {
+	store := New()
+	oldKnown := parseLink(t, linkOne)
+	midKnown := parseLink(t, linkTwo)
+	freshZero := parseLink(t, linkThree)
+	store.Merge([]contract.Link{oldKnown, midKnown})
+
+	// Mark older entries first so Updated determines their order, then merge a
+	// brand-new zero-latency entry last.
+	store.Mark(oldKnown.Hash, contract.StateCatalog, contract.Result{TCPLatency: 20 * time.Millisecond})
+	time.Sleep(2 * time.Millisecond)
+	store.Mark(midKnown.Hash, contract.StateFailed, contract.Result{TCPLatency: 5 * time.Millisecond})
+	time.Sleep(2 * time.Millisecond)
+	store.Merge([]contract.Link{freshZero})
+
+	pending := store.PendingNewest(0)
+	if len(pending) != 3 {
+		t.Fatalf("pending = %d, want 3", len(pending))
+	}
+	if pending[0].Link.Hash != freshZero.Hash {
+		t.Fatalf("newest zero-latency entry = %q, want %q", pending[0].Link.Hash, freshZero.Hash)
+	}
+	if pending[1].Link.Hash != midKnown.Hash || pending[2].Link.Hash != oldKnown.Hash {
+		t.Fatalf("pending order = %s,%s,%s", pending[0].Link.Hash, pending[1].Link.Hash, pending[2].Link.Hash)
+	}
+
+	if limited := store.PendingNewest(1); len(limited) != 1 || limited[0].Link.Hash != freshZero.Hash {
+		t.Fatalf("limited pending newest = %+v", limited)
+	}
+	if limited := store.PendingNewest(0); len(limited) != 3 {
+		t.Fatalf("non-positive limit = %d entries, want all", len(limited))
+	}
+}
+
+func TestStorePendingNewestEligibility(t *testing.T) {
+	store := New()
+	one := parseLink(t, linkOne)
+	two := parseLink(t, linkTwo)
+	three := parseLink(t, linkThree)
+	store.Merge([]contract.Link{one, two, three})
+	store.Mark(one.Hash, contract.StateReady, contract.Result{OK: true})
+	store.Mark(two.Hash, contract.StateTesting, contract.Result{})
+
+	pending := store.PendingNewest(0)
+	if len(pending) != 1 || pending[0].Link.Hash != three.Hash {
+		t.Fatalf("pending newest = %+v, want only the catalog entry", pending)
+	}
+}
+
 func TestStoreReclassifyPreservesResultAndScore(t *testing.T) {
 	store := New()
 	one := parseLink(t, linkOne)
