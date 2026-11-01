@@ -71,13 +71,15 @@ func (s *Server) handleCycleRun(w http.ResponseWriter, r *http.Request) {
 		s.redirectFlash(w, r, "/tests", "a cycle is already running", false)
 		return
 	}
-	// RunCycle may return after starting the cycle. Do not make the browser
-	// wait: start it in a bounded background goroutine and redirect now.
-	s.runCycleAsync(s.opts.Data)
-	s.redirectFlash(w, r, "/tests", "cycle run requested", false)
+	// A manual run must test pending entries even when the ready target is
+	// already met, so use RunCycleNow instead of the scheduler's RunCycle.
+	// Do not make the browser wait: start it in a bounded background goroutine
+	// and redirect now.
+	s.runCycleAsync(s.opts.Data.RunCycleNow)
+	s.redirectFlash(w, r, "/tests", "manual cycle started; testing newest pending entries", false)
 }
 
-func (s *Server) runCycleAsync(data Data) {
+func (s *Server) runCycleAsync(run func(context.Context) error) {
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -90,7 +92,7 @@ func (s *Server) runCycleAsync(data Data) {
 		}
 		ctx, cancel := context.WithTimeout(base, cycleTimeout)
 		defer cancel()
-		if err := data.RunCycle(ctx); err != nil {
+		if err := run(ctx); err != nil {
 			s.opts.Logger.Warn("control cycle failed", "err", sanitizeMessage(err.Error()))
 		}
 	}()

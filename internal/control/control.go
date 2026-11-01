@@ -41,6 +41,9 @@ type Data interface {
 	LastError() string
 	Replace(context.Context) error
 	RunCycle(context.Context) error
+	// RunCycleNow fetches sources and tests the newest pending entries even
+	// when the ready target is already met.
+	RunCycleNow(context.Context) error
 	CancelCycle()
 	RemoveReady(string) error
 	Subscriptions() []string

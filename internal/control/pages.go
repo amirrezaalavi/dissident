@@ -115,6 +115,8 @@ func (s *Server) handleTests(w http.ResponseWriter, r *http.Request) {
 		if s.cycling() {
 			p.CycleState = "running"
 		}
+		// Auto-refresh while a cycle runs so a short manual batch is visible.
+		p.Refresh = p.CycleState == "running"
 		p.Rows = testRows(s.recent(200), 200)
 		p.LastCycle = fmtTime(s.lastCycle())
 		p.NextCycle = fmtTime(s.nextCycle())

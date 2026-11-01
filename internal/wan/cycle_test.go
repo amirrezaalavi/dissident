@@ -3,6 +3,7 @@ package wan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -335,6 +336,131 @@ func TestSubscriptionsFileWithShareLinkStillLoads(t *testing.T) {
 	}
 	if got := activeHash(m); got == "" {
 		t.Fatal("parsed share link was not promoted")
+	}
+}
+
+// cloudflareTestLink returns a link whose literal server is inside Cloudflare's
+// published IPv4 ranges, so provider classification treats it as Cloudflare.
+func cloudflareTestLink(hash string) contract.Link {
+	link := testLink(hash)
+	link.Server = "104.16.0.1"
+	link.Raw = "vless://" + testUUID + "@104.16.0.1:443?type=tcp&security=none#" + hash
+	return link
+}
+
+func TestRunCycleNowTestsPendingWhenReadyTargetMet(t *testing.T) {
+	m, fr, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 3
+	})
+	setActive(t, m, testLink("active"), 29010)
+	setReady(m, testReady("standby-a", 3), testReady("standby-b", 2), testReady("standby-c", 1))
+	store.Merge([]contract.Link{testLink("new-pending")})
+
+	// The scheduled cycle is a no-op because readiness is already satisfied.
+	if err := m.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	if calls := fr.testLinks(); len(calls) != 0 {
+		t.Fatalf("scheduled RunCycle tested %v while at ready target", calls)
+	}
+
+	// The manual cycle must probe what the user just added.
+	if err := m.RunCycleNow(context.Background()); err != nil {
+		t.Fatalf("RunCycleNow: %v", err)
+	}
+	calls := fr.testLinks()
+	if len(calls) != 1 || calls[0] != "new-pending" {
+		t.Fatalf("RunCycleNow test calls = %v, want [new-pending]", calls)
+	}
+}
+
+func TestRunCycleNowIgnoresReadyTargetStopAndReserveOnly(t *testing.T) {
+	m, fr, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 1
+	})
+	setActive(t, m, testLink("active"), 29011)
+	cfStandby := cloudflareTestLink("cf-standby")
+	setReady(m, contract.Ready{
+		Link: cfStandby, Score: 1, LastCheck: time.Now().UTC(), ExitIP: "203.0.113.9",
+	})
+	// The pool lacks a non-Cloudflare standby, so a scheduled cycle at the
+	// ready target would reserveOnly and test just the one non-Cloudflare entry.
+	store.Merge([]contract.Link{
+		cloudflareTestLink("cf-1"),
+		cloudflareTestLink("cf-2"),
+		cloudflareTestLink("cf-3"),
+		testLink("non-cf-1"),
+	})
+
+	if err := m.RunCycleNow(context.Background()); err != nil {
+		t.Fatalf("RunCycleNow: %v", err)
+	}
+	if calls := fr.testLinks(); len(calls) != 4 {
+		t.Fatalf("RunCycleNow test calls = %v, want all 4 pending entries", calls)
+	}
+}
+
+func TestRunCycleNowBatchIsBounded(t *testing.T) {
+	t.Run("manual batch", func(t *testing.T) {
+		m, fr, store := testManager(t, func(c *config.Config) {
+			c.Cycle.ReadyTarget = 3
+		})
+		setActive(t, m, testLink("active"), 29012)
+		setReady(m, testReady("standby-a", 3), testReady("standby-b", 2), testReady("standby-c", 1))
+		links := make([]contract.Link, 0, manualCycleBatch+5)
+		for i := 0; i < manualCycleBatch+5; i++ {
+			links = append(links, testLink(fmt.Sprintf("batch-%02d", i)))
+		}
+		store.Merge(links)
+
+		if err := m.RunCycleNow(context.Background()); err != nil {
+			t.Fatalf("RunCycleNow: %v", err)
+		}
+		if got := len(fr.testLinks()); got != manualCycleBatch {
+			t.Fatalf("manual batch tested %d entries, want %d", got, manualCycleBatch)
+		}
+	})
+
+	t.Run("real test cap", func(t *testing.T) {
+		m, fr, store := testManager(t, func(c *config.Config) {
+			c.Cycle.ReadyTarget = 3
+			c.Test.RealTestCap = 7
+		})
+		setActive(t, m, testLink("active"), 29013)
+		setReady(m, testReady("standby-a", 3), testReady("standby-b", 2), testReady("standby-c", 1))
+		links := make([]contract.Link, 0, 20)
+		for i := 0; i < 20; i++ {
+			links = append(links, testLink(fmt.Sprintf("capped-%02d", i)))
+		}
+		store.Merge(links)
+
+		if err := m.RunCycleNow(context.Background()); err != nil {
+			t.Fatalf("RunCycleNow: %v", err)
+		}
+		if got := len(fr.testLinks()); got != 7 {
+			t.Fatalf("capped batch tested %d entries, want 7", got)
+		}
+	})
+}
+
+func TestRunCycleNowHonorsFailedRetryCooldown(t *testing.T) {
+	m, fr, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 1
+		c.Cycle.FailedRetry = time.Hour
+	})
+	setActive(t, m, testLink("active"), 29014)
+	setReady(m, testReady("standby", 1))
+	store.Merge([]contract.Link{testLink("cooled-fail"), testLink("fresh-pass")})
+	store.Mark(testLink("cooled-fail").Hash, contract.StateFailed, contract.Result{
+		Hash: testLink("cooled-fail").Hash, OK: false, Reason: "unreachable", At: time.Now().UTC(),
+	})
+
+	if err := m.RunCycleNow(context.Background()); err != nil {
+		t.Fatalf("RunCycleNow: %v", err)
+	}
+	calls := fr.testLinks()
+	if len(calls) != 1 || calls[0] != testLink("fresh-pass").Hash {
+		t.Fatalf("RunCycleNow test calls = %v, want only fresh-pass", calls)
 	}
 }
 

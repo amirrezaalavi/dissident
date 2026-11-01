@@ -62,6 +62,7 @@ type fakeData struct {
 	replaceCalls    int
 	removeCalls     int
 	runCalls        int
+	runNowCalls     int
 	cancelCalls     int
 	addCalls        int
 	removeSubCalls  int
@@ -171,6 +172,19 @@ func (f *fakeData) Replace(ctx context.Context) error {
 func (f *fakeData) RunCycle(ctx context.Context) error {
 	f.mu.Lock()
 	f.runCalls++
+	f.mu.Unlock()
+	return f.runCycleFake(ctx)
+}
+
+func (f *fakeData) RunCycleNow(ctx context.Context) error {
+	f.mu.Lock()
+	f.runNowCalls++
+	f.mu.Unlock()
+	return f.runCycleFake(ctx)
+}
+
+func (f *fakeData) runCycleFake(ctx context.Context) error {
+	f.mu.Lock()
 	started, release, done, err := f.runStarted, f.runRelease, f.runDone, f.runErr
 	f.mu.Unlock()
 	if started != nil {
@@ -253,6 +267,12 @@ func (f *fakeData) counts() (replace, remove, run, cancel, add, removeSub int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.replaceCalls, f.removeCalls, f.runCalls, f.cancelCalls, f.addCalls, f.removeSubCalls
+}
+
+func (f *fakeData) runNowCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runNowCalls
 }
 
 func (f *fakeData) replaceHadDeadline() bool {
@@ -654,13 +674,16 @@ func TestCycleActions(t *testing.T) {
 		t.Fatalf("run status = %d, want 303: %s", rec.Code, rec.Body.String())
 	}
 	loc, _ := url.Parse(rec.Header().Get("Location"))
-	if loc.Path != "/tests" || loc.Query().Get("msg") != "cycle run requested" {
+	if loc.Path != "/tests" || loc.Query().Get("msg") != "manual cycle started; testing newest pending entries" {
 		t.Fatalf("run redirect = %q", rec.Header().Get("Location"))
 	}
 	select {
 	case <-fake.runStarted:
 	case <-time.After(2 * time.Second):
-		t.Fatal("RunCycle was not called")
+		t.Fatal("RunCycleNow was not called")
+	}
+	if got := fake.runNowCount(); got != 1 {
+		t.Fatalf("RunCycleNow calls = %d, want 1", got)
 	}
 	close(fake.runRelease)
 	select {
@@ -683,6 +706,28 @@ func TestCycleActions(t *testing.T) {
 	}
 	if _, _, _, cancel, _, _ := fake.counts(); cancel != 1 {
 		t.Fatalf("CancelCycle calls = %d", cancel)
+	}
+}
+
+func TestTestsPageRefreshesOnlyWhileCycleRuns(t *testing.T) {
+	fake := newFakeData(testSnapshot(t))
+	handler := newTestServer(t, Options{Data: fake, Config: testConfig(t)}).Handler()
+
+	rec := serve(t, handler, http.MethodGet, "/tests")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("idle tests status = %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), `http-equiv="refresh"`) {
+		t.Fatal("idle /tests page should not auto-refresh")
+	}
+
+	fake.setCycling(true)
+	rec = serve(t, handler, http.MethodGet, "/tests")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("running tests status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `http-equiv="refresh"`) {
+		t.Fatal("running /tests page should auto-refresh")
 	}
 }
 
