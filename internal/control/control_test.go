@@ -585,18 +585,22 @@ func TestPanelUsesBoundedEntryPaths(t *testing.T) {
 		t.Fatalf("overview called Recent %d times", recentCalls)
 	}
 
-	if rec := serve(t, handler, http.MethodGet, "/tests"); rec.Code != http.StatusOK {
-		t.Fatalf("tests status = %d", rec.Code)
+	testsRec := serve(t, handler, http.MethodGet, "/tests")
+	if testsRec.Code != http.StatusOK {
+		t.Fatalf("tests status = %d", testsRec.Code)
 	}
 	fake.mu.Lock()
 	recentCalls, recentLimit := fake.recentCalls, fake.recentLimit
-	testedCalls = fake.testedCalls
+	testedCalls, testedLimit = fake.testedCalls, fake.testedLimit
 	fake.mu.Unlock()
 	if recentCalls != 1 || recentLimit != 200 {
 		t.Fatalf("tests called Recent %d times with limit %d, want 1/200", recentCalls, recentLimit)
 	}
-	if testedCalls != 1 {
-		t.Fatalf("tests called RecentTested %d times, want 1 (overview only)", testedCalls)
+	if testedCalls != 2 || testedLimit != 20 {
+		t.Fatalf("tests called RecentTested %d times with limit %d, want 2/20 (overview + tests)", testedCalls, testedLimit)
+	}
+	if !strings.Contains(testsRec.Body.String(), "Newest result first") {
+		t.Fatal("tests page has no recently-tested section")
 	}
 }
 

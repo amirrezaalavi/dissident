@@ -94,6 +94,7 @@ type testsPage struct {
 	baseData
 	Snapshot   contract.Snapshot
 	Rows       []testRow
+	Recent     []testRow
 	CycleState string
 	LastCycle  string
 	NextCycle  string
@@ -118,6 +119,7 @@ func (s *Server) handleTests(w http.ResponseWriter, r *http.Request) {
 		// Auto-refresh while a cycle runs so a short manual batch is visible.
 		p.Refresh = p.CycleState == "running"
 		p.Rows = testRows(s.recent(200), 200)
+		p.Recent = testRows(s.recentTested(20), 20)
 		p.LastCycle = fmtTime(s.lastCycle())
 		p.NextCycle = fmtTime(s.nextCycle())
 		p.LastError = sanitizeReason(s.lastError())
