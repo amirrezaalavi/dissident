@@ -170,12 +170,14 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 	if cooldown < 0 {
 		cooldown = 0
 	}
-	catalogPending := m.catalog.Pending(0)
+	var catalogPending []contract.Entry
 	if force {
 		// Newest entries first: a zero-latency entry merged or reclassified
 		// moments ago must not sit behind thousands of older known-latency
 		// entries in the scheduled Pending order.
 		catalogPending = m.catalog.PendingNewest(0)
+	} else {
+		catalogPending = m.catalog.Pending(0)
 	}
 	pending := make([]contract.Entry, 0)
 	for _, entry := range catalogPending {
@@ -320,7 +322,7 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 		cycleErr = context.Canceled
 	}
 	if force {
-		m.logger.Info("wan: manual cycle testing pending entries",
+		m.logger.Info("wan: manual cycle finished",
 			"queued", len(queue),
 			"tested", tested,
 			"forced", true)
