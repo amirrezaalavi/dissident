@@ -156,23 +156,33 @@ func TestStorePendingOrdering(t *testing.T) {
 	one := parseLink(t, linkOne)
 	two := parseLink(t, linkTwo)
 	three := parseLink(t, linkThree)
-	store.Merge([]contract.Link{one, two, three})
 
-	// one: 20ms, two: zero, three: 5ms.
-	store.Mark(one.Hash, contract.StateCatalog, contract.Result{TCPLatency: 20 * time.Millisecond})
-	time.Sleep(2 * time.Millisecond)
-	store.Mark(two.Hash, contract.StateCatalog, contract.Result{})
-	time.Sleep(2 * time.Millisecond)
-	store.Mark(three.Hash, contract.StateFailed, contract.Result{TCPLatency: 5 * time.Millisecond})
+	// A fast TCP failure must not outrank an entry that was never tested.
+	store.Merge([]contract.Link{one, two})
+	store.Mark(two.Hash, contract.StateFailed, contract.Result{OK: false, TCPLatency: 5 * time.Millisecond})
 
 	pending := store.Pending(0)
-	if len(pending) != 3 {
-		t.Fatalf("pending = %d", len(pending))
+	if len(pending) != 2 || pending[0].Link.Hash != one.Hash {
+		t.Fatalf("untested entry did not outrank a fast failure: %+v", pending)
 	}
-	if pending[0].Link.Hash != three.Hash || pending[1].Link.Hash != one.Hash || pending[2].Link.Hash != two.Hash {
-		t.Fatalf("pending order = %s,%s,%s", pending[0].Link.Hash, pending[1].Link.Hash, pending[2].Link.Hash)
+
+	// Once both have been attempted, retries rotate by least recent attempt,
+	// not by latency: otherwise the fastest dead entry keeps the head forever.
+	store.Mark(one.Hash, contract.StateCatalog, contract.Result{TCPLatency: 20 * time.Millisecond})
+	time.Sleep(2 * time.Millisecond)
+	store.Mark(two.Hash, contract.StateFailed, contract.Result{TCPLatency: 5 * time.Millisecond})
+	if ordered := store.Pending(0); ordered[0].Link.Hash != one.Hash {
+		t.Fatalf("least recently attempted entry did not sort first: %+v", ordered)
 	}
-	if limited := store.Pending(2); len(limited) != 2 || limited[0].Link.Hash != three.Hash {
+
+	// A newly merged entry takes priority over retries.
+	time.Sleep(2 * time.Millisecond)
+	store.Merge([]contract.Link{three})
+	pending = store.Pending(0)
+	if len(pending) != 3 || pending[0].Link.Hash != three.Hash {
+		t.Fatalf("new entry did not take priority: %+v", pending)
+	}
+	if limited := store.Pending(1); len(limited) != 1 || limited[0].Link.Hash != three.Hash {
 		t.Fatalf("limited pending = %+v", limited)
 	}
 
@@ -182,16 +192,6 @@ func TestStorePendingOrdering(t *testing.T) {
 		if entry.Link.Hash == three.Hash {
 			t.Fatal("ready entry returned as pending")
 		}
-	}
-
-	// Equal latency sorts by oldest Updated first.
-	other := New()
-	other.Merge([]contract.Link{one, two})
-	other.Mark(one.Hash, contract.StateCatalog, contract.Result{TCPLatency: time.Millisecond})
-	time.Sleep(3 * time.Millisecond)
-	other.Mark(two.Hash, contract.StateCatalog, contract.Result{TCPLatency: time.Millisecond})
-	if ordered := other.Pending(0); ordered[0].Link.Hash != one.Hash {
-		t.Fatalf("older entry did not sort first: %+v", ordered)
 	}
 }
 

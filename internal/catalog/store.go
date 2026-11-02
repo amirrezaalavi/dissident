@@ -231,8 +231,14 @@ func siftDownWorst(entries []*contract.Entry, i int, testedOnly bool) {
 }
 
 // Pending returns entries that still need qualification (catalog or failed),
-// ordered by last TCP latency ascending with zero latency last, then by oldest
-// Updated. A limit of zero or less returns every pending entry.
+// with coverage first: never-attempted entries, then least-recently-attempted
+// retries. TCP latency is only a tie-break among entries attempted at the same
+// time. A limit of zero or less returns every pending entry.
+//
+// Ordering by latency alone is unsafe for a large catalog: a small set of
+// fast-but-dead targets keeps the head of the queue, so after every
+// failed-retry cooldown the same candidates are retested and everything merged
+// later is starved.
 func (s *Store) Pending(limit int) []contract.Entry {
 	if s == nil {
 		return nil
@@ -248,6 +254,18 @@ func (s *Store) Pending(limit int) []contract.Entry {
 
 	sort.SliceStable(out, func(i, j int) bool {
 		left, right := out[i], out[j]
+		// Untested entries first: coverage before retries.
+		leftUntested := left.Attempts == 0
+		rightUntested := right.Attempts == 0
+		if leftUntested != rightUntested {
+			return leftUntested
+		}
+		// Rotate retries by least-recently-attempted so a failed entry cannot
+		// keep the head of the queue once its cooldown expires.
+		if !left.Updated.Equal(right.Updated) {
+			return left.Updated.Before(right.Updated)
+		}
+		// Latency remains a hint among entries attempted at the same time.
 		leftZero := left.Last.TCPLatency <= 0
 		rightZero := right.Last.TCPLatency <= 0
 		if leftZero != rightZero {
@@ -255,9 +273,6 @@ func (s *Store) Pending(limit int) []contract.Entry {
 		}
 		if !leftZero && left.Last.TCPLatency != right.Last.TCPLatency {
 			return left.Last.TCPLatency < right.Last.TCPLatency
-		}
-		if !left.Updated.Equal(right.Updated) {
-			return left.Updated.Before(right.Updated)
 		}
 		return left.Link.Hash < right.Link.Hash
 	})
