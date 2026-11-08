@@ -230,7 +230,10 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 			case tasks <- entry:
 				inFlight++
 			case <-cycleCtx.Done():
-				m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
+				// Cancellation is not a failed attempt. Leave the entry
+				// eligible so the next cycle can test it instead of
+				// blacklisting it for the failed-retry cooldown.
+				m.markCatalog(entry.Link.Hash, contract.StateCatalog, contract.Result{
 					Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
 					Reason: "cycle canceled", At: m.now().UTC(),
 				})
@@ -250,7 +253,7 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		}
 		inFlight--
 		if canceled || cycleCtx.Err() != nil {
-			m.markCatalog(out.entry.Link.Hash, contract.StateFailed, contract.Result{
+			m.markCatalog(out.entry.Link.Hash, contract.StateCatalog, contract.Result{
 				Hash: out.entry.Link.Hash, Stage: contract.StageReal, OK: false,
 				Reason: "cycle canceled", At: m.now().UTC(),
 			})
@@ -301,6 +304,12 @@ func (m *Manager) applyCycleResult(ctx context.Context, entry contract.Entry, re
 		res.At = m.now().UTC()
 	}
 	if !res.OK {
+		if res.Transient {
+			// Local DNS failure: leave the candidate eligible so the next
+			// cycle can retry it once the resolver recovers.
+			m.markCatalog(entry.Link.Hash, contract.StateCatalog, res)
+			return
+		}
 		m.markCatalog(entry.Link.Hash, contract.StateFailed, res)
 		if res.Reason != "" {
 			m.setLastError(res.Reason)
@@ -313,7 +322,7 @@ func (m *Manager) applyCycleResult(ctx context.Context, entry contract.Entry, re
 		promoted, err := m.promoteReady(ctx, cand)
 		if err != nil {
 			if ctx.Err() != nil {
-				m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
+				m.markCatalog(entry.Link.Hash, contract.StateCatalog, contract.Result{
 					Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
 					Reason: "cycle canceled", At: m.now().UTC(),
 				})

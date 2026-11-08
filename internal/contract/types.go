@@ -68,6 +68,10 @@ type Result struct {
 	HTTPStatus int
 	Bytes      int64
 	ExitIP     string
+	// Transient marks a failure caused by the local environment (currently a
+	// DNS lookup failure) rather than by the candidate. Cycles requeue these
+	// without starting the failed-retry cooldown.
+	Transient bool
 }
 
 // Entry is one catalog item plus its last known qualification result.

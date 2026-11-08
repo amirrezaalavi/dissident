@@ -593,7 +593,7 @@ func boundedContext(ctx context.Context, fallback time.Duration) (context.Contex
 func (m *Manager) hasActive() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.active != nil && m.active.proc != nil
+	return m.active != nil && m.active.proc != nil && m.active.proc.Alive()
 }
 
 func (m *Manager) readyCount() int {
@@ -649,7 +649,7 @@ func (m *Manager) Route(ctx context.Context) (proxy.Route, error) {
 	_ = ctx
 	m.mu.Lock()
 	a := m.active
-	if a == nil || a.proc == nil {
+	if a == nil || a.proc == nil || !a.proc.Alive() {
 		m.mu.Unlock()
 		return proxy.Route{}, errNoActive
 	}
@@ -956,6 +956,20 @@ func (m *Manager) probeOnce(ctx context.Context) {
 	a := m.active
 	if a == nil || a.proc == nil {
 		m.mu.Unlock()
+		return
+	}
+	if !a.proc.Alive() {
+		// The child exited. Do not wait for three failed probes: replace
+		// immediately so the proxy stops dialing a dead loopback port.
+		if now.Before(m.nextReplaceAt) {
+			m.mu.Unlock()
+			return
+		}
+		m.nextReplaceAt = now.Add(replaceCooldown)
+		routeID := a.routeID
+		m.mu.Unlock()
+		m.logger.Warn("wan: active xray exited; replacing", "route", routeID)
+		m.triggerReplace("active xray exited")
 		return
 	}
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(a.meta.LocalPort))

@@ -21,6 +21,15 @@
   per-cycle test cap still sweeps the catalog instead of retesting the same
   low-latency failures.
 - The failed-replacement cooldown is 90 seconds instead of five minutes.
+- An exited active xray child is detected on the next liveness tick, the proxy
+  stops dialing its dead loopback port, and a cycle can promote a fresh
+  candidate immediately instead of only queueing it.
+- Cancelling a cycle returns in-flight candidates to the catalog instead of
+  putting them in the failed-retry cooldown.
+- A local DNS failure during qualification no longer blacklists a candidate for
+  30 minutes.
+- Added `docs/STATE-SCENARIOS.md` with the state matrix, live fault-injection
+  plan, and remaining risks.
 
 ## v0.1.1 — 2026-10-27
 
