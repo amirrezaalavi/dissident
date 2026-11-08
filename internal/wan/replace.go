@@ -10,14 +10,22 @@ import (
 	"dissident/internal/xraycfg"
 )
 
+const promotionFailureThreshold = 3
+
+// errPromotionTimeout marks an attempt that ran out of time without proving
+// the candidate itself bad. Local saturation or a busy test pool must not be
+// allowed to evict a standby that already passed qualification.
+var errPromotionTimeout = errors.New("wan: promotion timed out")
+
 // Replace performs a make-before-break promotion of the highest-score ready
 // link. The old process is never stopped before the swap point; after the swap
 // it is drained for swap.drain_timeout and then stopped.
 //
-// Only one Replace runs at a time. A failed candidate is removed from ready and
-// marked failed in the catalog, then the next candidate is tried (the original
-// list is walked at most once). With no promotable candidate a cycle is
-// triggered asynchronously and an error is returned.
+// Only one Replace runs at a time. A candidate that definitively fails is
+// evicted only after repeated failures; one transient upstream blip must not
+// empty the failover pool. The next candidate is still tried in the same pass
+// (the original list is walked at most once). With no promotable candidate a
+// cycle is triggered asynchronously and an error is returned.
 func (m *Manager) Replace(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -70,8 +78,30 @@ func (m *Manager) Replace(ctx context.Context) error {
 		p, mode, err := m.promoteCandidate(ctx, cand, promotionTimeout)
 		if err != nil {
 			lastErr = err
-			m.logger.Warn("wan: promotion failed",
-				"hash", cand.Link.Hash, "promotion_mode", mode, "err", err)
+			if errors.Is(err, errPromotionTimeout) || errors.Is(err, context.DeadlineExceeded) {
+				// Keep the candidate: a timeout is usually local contention,
+				// not evidence that the link is dead.
+				m.logger.Warn("wan: promotion timed out; keeping candidate ready",
+					"hash", cand.Link.Hash, "promotion_mode", mode, "err", err)
+				continue
+			}
+			m.mu.Lock()
+			if m.promoteFails == nil {
+				m.promoteFails = make(map[string]int)
+			}
+			m.promoteFails[cand.Link.Hash]++
+			fails := m.promoteFails[cand.Link.Hash]
+			m.mu.Unlock()
+			if fails < promotionFailureThreshold {
+				m.logger.Warn("wan: promotion failed; keeping candidate",
+					"hash", cand.Link.Hash, "promotion_mode", mode, "failures", fails, "err", err)
+				continue
+			}
+			m.mu.Lock()
+			delete(m.promoteFails, cand.Link.Hash)
+			m.mu.Unlock()
+			m.logger.Warn("wan: promotion failed after repeated attempts",
+				"hash", cand.Link.Hash, "promotion_mode", mode, "failures", fails, "err", err)
 			m.dropReady(cand.Link, contract.Result{
 				Hash: cand.Link.Hash, Stage: contract.StageReal, OK: false,
 				Reason: err.Error(), At: m.now().UTC(),
@@ -321,6 +351,8 @@ func (m *Manager) removeReadyLocked(hash string) {
 	if hash == "" {
 		return
 	}
+	delete(m.readyFails, hash)
+	delete(m.promoteFails, hash)
 	out := m.ready[:0]
 	for _, r := range m.ready {
 		if r.Link.Hash != hash {

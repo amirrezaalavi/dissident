@@ -99,8 +99,17 @@ func TestTrustedPromotionFailureDropsCandidateWithoutFallback(t *testing.T) {
 	if verified != 0 {
 		t.Fatalf("verification fallback calls = %d, want 0", verified)
 	}
+	// One failure keeps the candidate; repeated failures evict it.
+	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "trust-fail" {
+		t.Fatalf("ready = %v, want the failed candidate kept after one attempt", hashes)
+	}
+	m.cycling.Store(true)
+	for i := 1; i < promotionFailureThreshold; i++ {
+		_ = m.Replace(context.Background())
+	}
+	m.cycling.Store(false)
 	if hashes := readyHashes(m); len(hashes) != 0 {
-		t.Fatalf("ready = %v, want failed candidate dropped", hashes)
+		t.Fatalf("ready = %v, want candidate evicted after %d failures", hashes, promotionFailureThreshold)
 	}
 	for _, entry := range store.Entries() {
 		if entry.Link.Hash == "trust-fail" && entry.State != contract.StateFailed {

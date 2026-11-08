@@ -512,7 +512,9 @@ func TestReadyLivenessRemovesDeadDiverseEntry(t *testing.T) {
 		return pipeConn(), nil
 	}
 
-	m.checkReadyOnce(context.Background())
+	for i := 0; i < readyFailureThreshold; i++ {
+		m.checkReadyOnce(context.Background())
+	}
 	hashes := readyHashes(m)
 	if len(hashes) != 1 || hashes[0] != "live-cf" {
 		t.Fatalf("ready = %v, a dead diverse entry must not be retained", hashes)

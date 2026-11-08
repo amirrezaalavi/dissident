@@ -17,6 +17,10 @@ import (
 const (
 	defaultReadyLiveness = 100 * time.Second
 	defaultTCPTimeout    = 3 * time.Second
+	// readyFailureThreshold is the number of consecutive cheap TCP failures
+	// before a standby is evicted. A single 3 s dial under test load is far
+	// too weak to declare a qualified link dead.
+	readyFailureThreshold = 3
 )
 
 // readyLivenessLoop periodically checks standby metadata with a cheap TCP
@@ -95,7 +99,27 @@ func (m *Manager) checkReadyOnce(ctx context.Context) {
 
 		now := m.now().UTC()
 		if dialErr != nil {
+			// A local resolver failure is not a property of the link.
+			var dnsErr *net.DNSError
+			if errors.As(dialErr, &dnsErr) {
+				m.logger.Warn("wan: ready liveness DNS failed; keeping standby",
+					"hash", entry.Link.Hash, "err", dialErr)
+				continue
+			}
+
 			m.mu.Lock()
+			if m.readyFails == nil {
+				m.readyFails = make(map[string]int)
+			}
+			fails := m.readyFails[entry.Link.Hash] + 1
+			m.readyFails[entry.Link.Hash] = fails
+			if fails < readyFailureThreshold {
+				m.mu.Unlock()
+				m.logger.Warn("wan: ready liveness failed; keeping standby",
+					"hash", entry.Link.Hash, "failures", fails, "err", dialErr)
+				continue
+			}
+			delete(m.readyFails, entry.Link.Hash)
 			removed := removeReadyIfPresentLocked(m.ready, entry.Link.Hash)
 			if removed != nil {
 				m.ready = removed
@@ -114,6 +138,7 @@ func (m *Manager) checkReadyOnce(ctx context.Context) {
 		}
 
 		m.mu.Lock()
+		delete(m.readyFails, entry.Link.Hash)
 		for i := range m.ready {
 			if m.ready[i].Link.Hash == entry.Link.Hash {
 				m.ready[i].LastCheck = now

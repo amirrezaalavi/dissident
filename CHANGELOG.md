@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — provider-diverse pool
+
+### Added
+
+- Provider-aware ready pool: standbys are classified (Cloudflare vs
+  non-Cloudflare) and a reserve pass keeps at least one non-Cloudflare route.
+- Trusted promotion for a freshly qualified standby (render/start/verify only)
+  and coverage-first selection of untested catalog entries.
+- Manual cycle batches and recently-tested rows in the panel.
+
+### Fixed
+
+- Ported from the mainline failover work: an exited active xray is detected on
+  the next liveness tick and the proxy stops dialing its dead port.
+- Promotion uses a dedicated slot and keeps a candidate whose promotion timed
+  out; a standby is evicted only after three failed attempts.
+- Ready liveness tolerates three consecutive dial failures and ignores local
+  DNS failures, so the failover pool cannot be wiped by one resolver stall.
+- Speed liveness replaces only after two successful below-minimum samples;
+  probe errors no longer churn the active route.
+- Cancelling a cycle requeues in-flight candidates instead of blacklisting
+  them, and local DNS failures during qualification are transient.
+- A cycle is bounded by `test.real_test_cap` and a 20-minute launch budget.
+
 ## v0.1.1 — 2026-10-27
 
 ### Added

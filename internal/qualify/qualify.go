@@ -224,6 +224,11 @@ func (t *Tester) Test(ctx context.Context, link contract.Link) contract.Result {
 		latency, err := t.tcpCheck(ctx, link)
 		if err != nil {
 			failed := fail(contract.StageTCP, "tcp: %s", detailOf(err))
+			// A resolver failure says nothing about the candidate. Keep it
+			// eligible for the next cycle instead of poisoning the catalog
+			// with 30 minutes of failed-retry cooldown.
+			var dnsErr *net.DNSError
+			failed.Transient = errors.As(err, &dnsErr)
 			return &failed
 		}
 		result.TCPLatency = latency

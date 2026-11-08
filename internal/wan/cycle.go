@@ -19,6 +19,12 @@ const (
 	manualCycleBatch = 50
 )
 
+// maxCycleDuration bounds how long one qualification pass may keep launching
+// new candidates. A large catalog with a permissive test.real_test_cap used to
+// keep one cycle running for hours, saturating the host and starving failover.
+// Work left unlaunched stays pending for the next pass.
+var maxCycleDuration = 20 * time.Minute
+
 // RunCycle fetches configured sources, merges links into the catalog, and tests
 // pending entries in catalog order (TCP latency). It stops when there is an
 // active WAN and ready_target standbys are available, when pending entries run
@@ -252,14 +258,21 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 
 	stop := false
 	canceled := false
+	budgetHit := false
 	launched := 0
 	tested := 0
 	inFlight := 0
 	nonCFTested := 0
+	cycleDeadline := m.now().Add(maxCycleDuration)
 	for {
 		for !stop && !canceled && launched < len(queue) && inFlight < workers {
 			if err := cycleCtx.Err(); err != nil {
 				canceled = true
+				break
+			}
+			if m.now().After(cycleDeadline) {
+				stop = true
+				budgetHit = true
 				break
 			}
 			entry := queue[launched]
@@ -274,7 +287,7 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 					nonCFTested++
 				}
 			case <-cycleCtx.Done():
-				m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
+				m.markCatalog(entry.Link.Hash, contract.StateCatalog, contract.Result{
 					Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
 					Reason: "cycle canceled", At: m.now().UTC(),
 				})
@@ -294,7 +307,7 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 		}
 		inFlight--
 		if canceled || cycleCtx.Err() != nil {
-			m.markCatalog(out.entry.Link.Hash, contract.StateFailed, contract.Result{
+			m.markCatalog(out.entry.Link.Hash, contract.StateCatalog, contract.Result{
 				Hash: out.entry.Link.Hash, Stage: contract.StageReal, OK: false,
 				Reason: "cycle canceled", At: m.now().UTC(),
 			})
@@ -310,6 +323,10 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 		}
 	}
 
+	if budgetHit {
+		m.logger.Info("wan: cycle reached time budget; remaining entries stay pending",
+			"launched", launched, "queued", len(queue))
+	}
 	close(tasks)
 	workersWG.Wait()
 	if cycleCtx.Err() != nil {
@@ -380,6 +397,12 @@ func (m *Manager) applyCycleResult(ctx context.Context, entry contract.Entry, re
 		res.At = m.now().UTC()
 	}
 	if !res.OK {
+		if res.Transient {
+			// Local DNS failure: leave the candidate eligible so the next
+			// cycle can retry it once the resolver recovers.
+			m.markCatalog(entry.Link.Hash, contract.StateCatalog, res)
+			return
+		}
 		m.markCatalog(entry.Link.Hash, contract.StateFailed, res)
 		if res.Reason != "" {
 			m.setLastError(res.Reason)
@@ -392,7 +415,7 @@ func (m *Manager) applyCycleResult(ctx context.Context, entry contract.Entry, re
 		promoted, err := m.promoteReady(ctx, cand)
 		if err != nil {
 			if ctx.Err() != nil {
-				m.markCatalog(entry.Link.Hash, contract.StateFailed, contract.Result{
+				m.markCatalog(entry.Link.Hash, contract.StateCatalog, contract.Result{
 					Hash: entry.Link.Hash, Stage: contract.StageReal, OK: false,
 					Reason: "cycle canceled", At: m.now().UTC(),
 				})

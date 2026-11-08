@@ -52,7 +52,14 @@ const (
 	routeIDLength = 12
 	// replaceCooldown prevents a dead active WAN with no ready candidate from
 	// scheduling a replacement on every liveness tick (and spamming the log).
-	replaceCooldown = 5 * time.Minute
+	// It stays short so a failed attempt does not leave the proxy dead for
+	// minutes once a standby becomes available.
+	replaceCooldown = 90 * time.Second
+	// speedFailureThreshold is the number of consecutive successful speed
+	// measurements below the minimum before replacement is scheduled. A single
+	// sample taken while the bulk cycle is downloading must not churn the
+	// active route.
+	speedFailureThreshold = 2
 	// speedLivenessInterval is how often the active route is checked for the
 	// configured minimum download rate. Small GET probes do not detect a WAN
 	// that has collapsed from 4 Mbps to 0.6 Mbps.
@@ -170,6 +177,9 @@ type Manager struct {
 	cancelRequest bool
 	failures      map[string][]time.Time
 	probeFails    int
+	speedFails    int
+	readyFails    map[string]int
+	promoteFails  map[string]int
 	nextReplaceAt time.Time
 	// nextPassiveReplaceAt is the earliest time Report may trigger another
 	// replacement. It is pushed forward by passiveGracePeriod after a swap
@@ -241,6 +251,8 @@ func New(opts Options) *Manager {
 		logger:          logger,
 		stateFile:       opts.StateFile,
 		failures:        make(map[string][]time.Time),
+		readyFails:      make(map[string]int),
+		promoteFails:    make(map[string]int),
 		passiveGrace:    passiveGracePeriod,
 		passiveCooldown: passiveReplaceCooldown,
 		now:             time.Now,
@@ -505,6 +517,10 @@ func (m *Manager) restoreAttempt(ctx context.Context, link contract.Link, timeou
 	defer cancel()
 	p, err := start(actx, link)
 	if err != nil {
+		if errors.Is(actx.Err(), context.DeadlineExceeded) {
+			// The attempt expired; that says nothing about the candidate.
+			err = fmt.Errorf("%w: %v", errPromotionTimeout, err)
+		}
 		if p != nil {
 			stopCtx, stopCancel := boundedContext(context.Background(), defaultStopTimeout)
 			_ = m.stopProcess(stopCtx, p)
@@ -547,7 +563,11 @@ func (m *Manager) promotedOrVerified(ctx context.Context, link contract.Link, ti
 		"hash", link.Hash, "err", promoteErr, "degraded", true)
 	p, verifyErr := m.restoreAttempt(ctx, link, timeout, m.startVerified)
 	if verifyErr != nil {
-		return nil, fmt.Errorf("wan: promotion failed (%v); verification fallback failed: %w", promoteErr, verifyErr)
+		combined := fmt.Errorf("wan: promotion failed (%v); verification fallback failed: %w", promoteErr, verifyErr)
+		if errors.Is(promoteErr, errPromotionTimeout) || errors.Is(verifyErr, errPromotionTimeout) {
+			return nil, fmt.Errorf("%w: %v", errPromotionTimeout, combined)
+		}
+		return nil, combined
 	}
 	if p == nil {
 		return nil, errors.New("wan: verification fallback returned no process")
@@ -665,7 +685,7 @@ func boundedContext(ctx context.Context, fallback time.Duration) (context.Contex
 func (m *Manager) hasActive() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.active != nil && m.active.proc != nil
+	return m.active != nil && m.active.proc != nil && m.active.proc.Alive()
 }
 
 func (m *Manager) readyCount() int {
@@ -744,7 +764,7 @@ func (m *Manager) Route(ctx context.Context) (proxy.Route, error) {
 	_ = ctx
 	m.mu.Lock()
 	a := m.active
-	if a == nil || a.proc == nil {
+	if a == nil || a.proc == nil || !a.proc.Alive() {
 		m.mu.Unlock()
 		return proxy.Route{}, errNoActive
 	}
@@ -1020,14 +1040,33 @@ func (m *Manager) speedProbeOnce(ctx context.Context) {
 		m.mu.Unlock()
 		return
 	}
-	if err == nil && speed >= minimum {
+	if err != nil {
+		// A failed probe measures nothing. Under load the speed endpoint
+		// routinely times out; that is not evidence the route is slow.
+		m.nextReplaceAt = time.Time{}
+		m.mu.Unlock()
+		m.logger.Debug("wan: active speed probe failed; not replacing",
+			"route", routeID, "err", err)
+		return
+	}
+	if speed >= minimum {
+		m.speedFails = 0
 		m.nextReplaceAt = time.Time{}
 		m.mu.Unlock()
 		return
 	}
+	m.speedFails++
+	failures := m.speedFails
+	if failures < speedFailureThreshold {
+		m.mu.Unlock()
+		m.logger.Warn("wan: active speed below minimum",
+			"route", routeID, "mbps", speed, "minimum", minimum, "failures", failures)
+		return
+	}
+	m.speedFails = 0
 	m.mu.Unlock()
 	m.logger.Warn("wan: active speed below minimum; replacing",
-		"route", routeID, "mbps", speed, "minimum", minimum, "err", err)
+		"route", routeID, "mbps", speed, "minimum", minimum, "failures", failures)
 	m.triggerReplace("speed liveness")
 }
 
@@ -1043,6 +1082,20 @@ func (m *Manager) probeOnce(ctx context.Context) {
 	a := m.active
 	if a == nil || a.proc == nil {
 		m.mu.Unlock()
+		return
+	}
+	if !a.proc.Alive() {
+		// The child exited. Do not wait for three failed probes: replace
+		// immediately so the proxy stops dialing a dead loopback port.
+		if now.Before(m.nextReplaceAt) {
+			m.mu.Unlock()
+			return
+		}
+		m.nextReplaceAt = now.Add(replaceCooldown)
+		routeID := a.routeID
+		m.mu.Unlock()
+		m.logger.Warn("wan: active xray exited; replacing", "route", routeID)
+		m.triggerReplace("active xray exited")
 		return
 	}
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(a.meta.LocalPort))

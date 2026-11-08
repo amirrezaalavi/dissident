@@ -63,6 +63,12 @@ func TestReadyLivenessDropsFailedAndKeepsGood(t *testing.T) {
 		}
 	}
 
+	for i := 0; i < readyFailureThreshold-1; i++ {
+		m.checkReadyOnce(context.Background())
+		if hashes := readyHashes(m); len(hashes) != 2 {
+			t.Fatalf("after %d failures ready = %v, want both standbys kept", i+1, hashes)
+		}
+	}
 	m.checkReadyOnce(context.Background())
 
 	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "ready-good" {
@@ -85,8 +91,8 @@ func TestReadyLivenessDropsFailedAndKeepsGood(t *testing.T) {
 	mu.Lock()
 	gotDialed := append([]string(nil), dialed...)
 	mu.Unlock()
-	if len(gotDialed) != 2 {
-		t.Fatalf("dialed = %v, want two TCP checks", gotDialed)
+	if len(gotDialed) != 2*readyFailureThreshold {
+		t.Fatalf("dialed = %v, want %d TCP checks", gotDialed, 2*readyFailureThreshold)
 	}
 
 	data, err := os.ReadFile(m.statePath())
@@ -180,7 +186,9 @@ func TestReadyLivenessUsesConfiguredEgressDialerOnly(t *testing.T) {
 		}, nil
 	}
 
-	m.checkReadyOnce(context.Background())
+	for i := 0; i < readyFailureThreshold; i++ {
+		m.checkReadyOnce(context.Background())
+	}
 
 	mu.Lock()
 	gotDirect, gotBuilds, gotEgress := directCalls, egressBuilds, egressCalls
@@ -188,8 +196,8 @@ func TestReadyLivenessUsesConfiguredEgressDialerOnly(t *testing.T) {
 	if gotDirect != 0 {
 		t.Fatalf("direct dials = %d, want 0 when egress is configured", gotDirect)
 	}
-	if gotBuilds != 1 || gotEgress != 1 {
-		t.Fatalf("egress builds/calls = %d/%d, want 1/1", gotBuilds, gotEgress)
+	if gotBuilds != readyFailureThreshold || gotEgress != readyFailureThreshold {
+		t.Fatalf("egress builds/calls = %d/%d, want %d/%d", gotBuilds, gotEgress, readyFailureThreshold, readyFailureThreshold)
 	}
 	if hashes := readyHashes(m); len(hashes) != 0 {
 		t.Fatalf("ready = %v, want failed egress entry removed", hashes)

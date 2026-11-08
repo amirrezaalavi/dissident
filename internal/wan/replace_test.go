@@ -71,11 +71,19 @@ func TestReplaceFailureTriesNextReady(t *testing.T) {
 	if got := activeHash(m); got != "good" {
 		t.Fatalf("active = %q, want good", got)
 	}
-	if hashes := readyHashes(m); len(hashes) != 0 {
-		t.Fatalf("ready = %v, want empty", hashes)
+	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "bad" {
+		t.Fatalf("ready = %v, want the failed candidate kept", hashes)
 	}
 	if got := fr.promotionLinks(); len(got) != 2 || got[0] != "bad" || got[1] != "good" {
 		t.Fatalf("promotions = %v, want [bad good]", got)
+	}
+	m.cycling.Store(true)
+	for i := 1; i < promotionFailureThreshold; i++ {
+		_ = m.Replace(context.Background())
+	}
+	m.cycling.Store(false)
+	if hashes := readyHashes(m); len(hashes) != 0 {
+		t.Fatalf("ready = %v, want candidate evicted after %d failures", hashes, promotionFailureThreshold)
 	}
 	var badState contract.EntryState
 	for _, e := range store.Entries() {
@@ -182,8 +190,16 @@ func TestReplaceActiveSkipsFallbackAndTriesNext(t *testing.T) {
 	if verified != 0 {
 		t.Fatalf("verification fallback calls = %d, want 0 while an active WAN exists", verified)
 	}
+	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "bad" {
+		t.Fatalf("ready = %v, want the failed candidate kept", hashes)
+	}
+	m.cycling.Store(true)
+	for i := 1; i < promotionFailureThreshold; i++ {
+		_ = m.Replace(context.Background())
+	}
+	m.cycling.Store(false)
 	if hashes := readyHashes(m); len(hashes) != 0 {
-		t.Fatalf("ready = %v, want both candidates consumed", hashes)
+		t.Fatalf("ready = %v, want candidate evicted after %d failures", hashes, promotionFailureThreshold)
 	}
 	for _, entry := range store.Entries() {
 		if entry.Link.Hash == "bad" && entry.State != contract.StateFailed {
