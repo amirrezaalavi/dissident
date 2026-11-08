@@ -51,8 +51,11 @@ type Options struct {
 // Tester runs qualification stages. It holds only immutable configuration
 // after New, so concurrent Test calls are safe. The cheap, real, and speed
 // semaphores enforce test.cheap_workers, test.real_workers, and one serialized
-// speed transfer. portMu serializes free-port allocation plus xray startup so
-// concurrent deep tests cannot race for the same loopback port.
+// speed transfer. promoteSem is deliberately separate from realSem: promoting
+// a ready standby must never queue behind a long bulk test, or a failover
+// would time out while the cycle is busy. portMu serializes free-port
+// allocation plus xray startup so concurrent deep tests cannot race for the
+// same loopback port.
 type Tester struct {
 	test        config.TestConfig
 	urls        config.URLsConfig
@@ -64,10 +67,11 @@ type Tester struct {
 	egressErr   error
 	dialFn      func(context.Context, string, string) (net.Conn, error)
 
-	cheapSem chan struct{}
-	realSem  chan struct{}
-	speedSem chan struct{}
-	portMu   sync.Mutex
+	cheapSem   chan struct{}
+	realSem    chan struct{}
+	speedSem   chan struct{}
+	promoteSem chan struct{}
+	portMu     sync.Mutex
 }
 
 // New builds a Tester, applying defaults for unset bounds and constructing
@@ -88,6 +92,7 @@ func New(opts Options) *Tester {
 		cheapSem:    make(chan struct{}, test.CheapWorkers),
 		realSem:     make(chan struct{}, test.RealWorkers),
 		speedSem:    make(chan struct{}, 1),
+		promoteSem:  make(chan struct{}, 1),
 	}
 	if tester.egressProxy != "" {
 		dial, err := platform.NewEgressDialer(tester.egressProxy, test.TCPTimeout)
@@ -380,10 +385,10 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 	if err := validateProtocol(link); err != nil {
 		return fail(contract.StageProtocol, "protocol: %s", detailOf(err))
 	}
-	if err := t.acquire(ctx, t.realSem); err != nil {
+	if err := t.acquire(ctx, t.promoteSem); err != nil {
 		return fail(contract.StageReal, "real: %s", detailOf(err))
 	}
-	defer t.release(t.realSem)
+	defer t.release(t.promoteSem)
 
 	t.portMu.Lock()
 	port, err := platform.FreePort()
@@ -431,11 +436,11 @@ func (t *Tester) Promote(ctx context.Context, link contract.Link) (contract.Resu
 
 	measuredStage := contract.StageReal
 	if t.test.MinSpeedMbps > 0 || t.test.MaxTTFBMs > 0 {
-		if err := t.acquire(ctx, t.speedSem); err != nil {
-			return fail(contract.StageSpeed, "speed: %s", detailOf(err))
-		}
+		// Promotion is rare and serialized, so it does not take speedSem:
+		// waiting behind a bulk test would blow the promotion deadline and
+		// discard an otherwise healthy standby. At most one extra 1 MB
+		// transfer runs here, alongside the single test speed stage.
 		speed, ttfb, err := t.Speed(ctx, socksAddr)
-		t.release(t.speedSem)
 		if err != nil {
 			return fail(contract.StageSpeed, "speed: %s", detailOf(err))
 		}

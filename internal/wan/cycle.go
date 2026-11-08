@@ -11,10 +11,17 @@ import (
 	"dissident/internal/contract"
 )
 
+// maxCycleDuration bounds how long one qualification pass may keep launching
+// new candidates. A large catalog with test.real_test_cap = 0 used to keep a
+// single cycle running for hours; that saturated the host, starved promotion,
+// and blocked every scheduled cycle. Work left unlaunched stays pending for the
+// next pass.
+var maxCycleDuration = 20 * time.Minute
+
 // RunCycle fetches configured sources, merges links into the catalog, and tests
 // pending entries in catalog order (TCP latency). It stops when there is an
 // active WAN and ready_target standbys are available, when pending entries run
-// out, or when the context is canceled.
+// out, when maxCycleDuration elapses, or when the context is canceled.
 //
 // A source-fetch failure or a canceled cycle never tears down the active WAN
 // and never clears the ready list: the last-known-good runtime is preserved.
@@ -199,12 +206,19 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 
 	stop := false
 	canceled := false
+	budgetHit := false
 	launched := 0
 	inFlight := 0
+	cycleDeadline := m.now().Add(maxCycleDuration)
 	for {
 		for !stop && !canceled && launched < len(queue) && inFlight < workers {
 			if err := cycleCtx.Err(); err != nil {
 				canceled = true
+				break
+			}
+			if m.now().After(cycleDeadline) {
+				stop = true
+				budgetHit = true
 				break
 			}
 			entry := queue[launched]
@@ -248,6 +262,10 @@ func (m *Manager) RunCycle(ctx context.Context) error {
 		}
 	}
 
+	if budgetHit {
+		m.logger.Info("wan: cycle reached time budget; remaining entries stay pending",
+			"launched", launched, "queued", len(queue))
+	}
 	close(tasks)
 	workersWG.Wait()
 	if cycleCtx.Err() != nil {

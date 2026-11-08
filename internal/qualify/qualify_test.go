@@ -583,3 +583,24 @@ func TestPromoteRealXray(t *testing.T) {
 		t.Fatalf("expected failed promotion, got process=%v err=%v", process, err)
 	}
 }
+
+func TestPromoteIsNotBlockedByFullRealPool(t *testing.T) {
+	// A promotion must not queue behind bulk qualification. Before the
+	// dedicated promote semaphore, filling realSem made Promote time out with
+	// "real: context deadline exceeded" while a cycle was running; Replace
+	// then dropped every standby and the proxy was left without a failover.
+	tester := New(Options{
+		Test:    config.TestConfig{RealWorkers: 1, HTTPTimeout: time.Second, XrayTimeout: time.Second},
+		XrayBin: "true",
+	})
+	tester.realSem <- struct{}{}
+	defer func() { <-tester.realSem }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	link := contract.Link{Protocol: contract.ProtocolSOCKS5, Server: "127.0.0.1", Port: 1, Hash: "pool-full"}
+	_, _, err := tester.Promote(ctx, link)
+	if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("Promote blocked on the bulk-test real pool: %v", err)
+	}
+}

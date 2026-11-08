@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -335,4 +336,38 @@ func contains(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestCycleTimeBudgetLeavesWorkPending(t *testing.T) {
+	old := maxCycleDuration
+	maxCycleDuration = 40 * time.Millisecond
+	defer func() { maxCycleDuration = old }()
+
+	m, fr, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 5
+		c.Cycle.ReadyMin = 5
+	})
+	links := make([]contract.Link, 0, 4000)
+	for i := 0; i < 4000; i++ {
+		links = append(links, testLink("budget-"+strconv.Itoa(i)))
+	}
+	store.Merge(links)
+	fr.setTestFn(func(ctx context.Context, link contract.Link) contract.Result {
+		time.Sleep(time.Millisecond)
+		return contract.Result{Hash: link.Hash, Stage: contract.StageReal, OK: false, Reason: "rejected", At: time.Now().UTC()}
+	})
+
+	// No active WAN means the cycle reports an error at the end; what matters
+	// is that it returns promptly and leaves the rest of the queue pending.
+	_ = m.RunCycle(context.Background())
+
+	pending := 0
+	for _, entry := range store.Entries() {
+		if entry.State == contract.StateCatalog {
+			pending++
+		}
+	}
+	if pending == 0 {
+		t.Fatal("cycle consumed the whole queue despite the time budget")
+	}
 }

@@ -28,7 +28,7 @@ promotion_timeout = 15s
 [test]
 cheap_workers     = 8
 real_workers      = 1
-real_test_cap     = 0
+real_test_cap     = 500
 tcp_timeout       = 3s
 tls_timeout       = 3s
 protocol_timeout  = 3s

@@ -64,6 +64,11 @@ func TestReadyLivenessDropsFailedAndKeepsGood(t *testing.T) {
 	}
 
 	m.checkReadyOnce(context.Background())
+	// One failed 3 s dial is not enough evidence: the standby stays.
+	if hashes := readyHashes(m); len(hashes) != 2 {
+		t.Fatalf("after one failure ready = %v, want both standbys kept", hashes)
+	}
+	m.checkReadyOnce(context.Background())
 
 	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "ready-good" {
 		t.Fatalf("ready = %v, want only ready-good", hashes)
@@ -85,8 +90,8 @@ func TestReadyLivenessDropsFailedAndKeepsGood(t *testing.T) {
 	mu.Lock()
 	gotDialed := append([]string(nil), dialed...)
 	mu.Unlock()
-	if len(gotDialed) != 2 {
-		t.Fatalf("dialed = %v, want two TCP checks", gotDialed)
+	if len(gotDialed) != 4 {
+		t.Fatalf("dialed = %v, want four TCP checks (two passes over two standbys)", gotDialed)
 	}
 
 	data, err := os.ReadFile(m.statePath())
@@ -99,6 +104,25 @@ func TestReadyLivenessDropsFailedAndKeepsGood(t *testing.T) {
 	}
 	if len(saved.Ready) != 1 || saved.Ready[0].Link.Hash != "ready-good" {
 		t.Fatalf("persisted ready = %+v, want only ready-good", saved.Ready)
+	}
+}
+
+func TestReadyLivenessKeepsStandbyOnDNSFailure(t *testing.T) {
+	m, _, store := testManager(t, nil)
+	// A host that cannot resolve today is not a dead standby. Dropping it
+	// would empty the failover pool whenever the local resolver stalls under
+	// the load of a qualification cycle.
+	entry := readyFor("ready-dns", "unresolvable.example", 443, 5)
+	setReady(m, entry)
+	store.Merge([]contract.Link{entry.Link})
+	m.dial = func(ctx context.Context, network, address string, timeout time.Duration) (net.Conn, error) {
+		return nil, &net.DNSError{Err: "i/o timeout", Name: entry.Link.Server, IsTimeout: true}
+	}
+	for i := 0; i < 3; i++ {
+		m.checkReadyOnce(context.Background())
+	}
+	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "ready-dns" {
+		t.Fatalf("ready = %v, want the DNS-failed standby kept", hashes)
 	}
 }
 
@@ -181,6 +205,7 @@ func TestReadyLivenessUsesConfiguredEgressDialerOnly(t *testing.T) {
 	}
 
 	m.checkReadyOnce(context.Background())
+	m.checkReadyOnce(context.Background())
 
 	mu.Lock()
 	gotDirect, gotBuilds, gotEgress := directCalls, egressBuilds, egressCalls
@@ -188,8 +213,8 @@ func TestReadyLivenessUsesConfiguredEgressDialerOnly(t *testing.T) {
 	if gotDirect != 0 {
 		t.Fatalf("direct dials = %d, want 0 when egress is configured", gotDirect)
 	}
-	if gotBuilds != 1 || gotEgress != 1 {
-		t.Fatalf("egress builds/calls = %d/%d, want 1/1", gotBuilds, gotEgress)
+	if gotBuilds != 2 || gotEgress != 2 {
+		t.Fatalf("egress builds/calls = %d/%d, want 2/2", gotBuilds, gotEgress)
 	}
 	if hashes := readyHashes(m); len(hashes) != 0 {
 		t.Fatalf("ready = %v, want failed egress entry removed", hashes)

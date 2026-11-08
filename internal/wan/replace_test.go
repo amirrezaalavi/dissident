@@ -186,6 +186,32 @@ func TestReplaceEmptyReadyWithoutPendingStillErrors(t *testing.T) {
 	}
 }
 
+func TestReplaceKeepsCandidateWhenPromotionTimesOut(t *testing.T) {
+	m, fr, _ := testManager(t, func(c *config.Config) {
+		c.Swap.PromotionTimeout = 20 * time.Millisecond
+	})
+	setActive(t, m, testLink("old"), 28004)
+	setReady(m, testReady("slow", 5))
+	fr.setPromoteFn(func(ctx context.Context, link contract.Link) (process, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	// Keep the automatic refill cycle out of this test.
+	m.cycling.Store(true)
+	defer m.cycling.Store(false)
+
+	err := m.Replace(context.Background())
+	if err == nil {
+		t.Fatal("Replace should report that no candidate was promoted")
+	}
+	if got := activeHash(m); got != "old" {
+		t.Fatalf("active = %q, want old kept", got)
+	}
+	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "slow" {
+		t.Fatalf("ready = %v, want the timed-out candidate kept", hashes)
+	}
+}
+
 func TestReplaceIsSerialized(t *testing.T) {
 	m, fr, _ := testManager(t, func(c *config.Config) {
 		c.Swap.DrainTimeout = 20 * time.Millisecond

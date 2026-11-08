@@ -10,14 +10,23 @@ import (
 	"dissident/internal/xraycfg"
 )
 
+// errPromotionTimeout marks an attempt that ran out of time without proving
+// the candidate itself bad. Local saturation or a busy test pool must not be
+// allowed to evict a standby that already passed qualification.
+var errPromotionTimeout = errors.New("wan: promotion timed out")
+
 // Replace performs a make-before-break promotion of the highest-score ready
 // link. The old process is never stopped before the swap point; after the swap
 // it is drained for swap.drain_timeout and then stopped.
 //
-// Only one Replace runs at a time. A failed candidate is removed from ready and
-// marked failed in the catalog, then the next candidate is tried (the original
-// list is walked at most once). With no promotable candidate a cycle is
-// triggered asynchronously and an error is returned.
+// Only one Replace runs at a time. A candidate that definitively fails is
+// removed from ready and marked failed in the catalog, then the next candidate
+// is tried (the original list is walked at most once). A candidate whose
+// promotion only timed out is kept: a transient local stall (the bulk cycle
+// holding the CPU, DNS, or bandwidth) is not evidence that the link is dead,
+// and dropping the whole standby list on one bad minute is worse than
+// retrying. With no promotable candidate a cycle is triggered asynchronously
+// and an error is returned.
 func (m *Manager) Replace(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -74,6 +83,14 @@ func (m *Manager) Replace(ctx context.Context) error {
 		p, err := m.promotedOrVerified(ctx, cand.Link, promotionTimeout)
 		if err != nil {
 			lastErr = err
+			if errors.Is(err, errPromotionTimeout) || errors.Is(err, context.DeadlineExceeded) {
+				// Keep the candidate for a later attempt. It passed the full
+				// pipeline once; a timeout here is usually local contention,
+				// not a dead link.
+				m.logger.Warn("wan: promotion timed out; keeping candidate ready",
+					"hash", cand.Link.Hash, "err", err)
+				continue
+			}
 			m.logger.Warn("wan: promotion failed after verification fallback",
 				"hash", cand.Link.Hash, "err", err)
 			m.dropReady(cand.Link, contract.Result{
@@ -287,6 +304,7 @@ func (m *Manager) removeReadyLocked(hash string) {
 	if hash == "" {
 		return
 	}
+	delete(m.readyFails, hash)
 	out := m.ready[:0]
 	for _, r := range m.ready {
 		if r.Link.Hash != hash {
