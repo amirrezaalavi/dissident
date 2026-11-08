@@ -104,6 +104,14 @@ func (s *Store) Pending(limit int) []contract.Entry {
 
 	sort.SliceStable(out, func(i, j int) bool {
 		left, right := out[i], out[j]
+		// Never-tested entries come before retries. With a bounded per-cycle
+		// queue (test.real_test_cap), failed low-latency retries would
+		// otherwise occupy every slot and the catalog would never advance.
+		leftFailed := left.State == contract.StateFailed
+		rightFailed := right.State == contract.StateFailed
+		if leftFailed != rightFailed {
+			return !leftFailed
+		}
 		leftZero := left.Last.TCPLatency <= 0
 		rightZero := right.Last.TCPLatency <= 0
 		if leftZero != rightZero {

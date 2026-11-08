@@ -169,10 +169,12 @@ func TestStorePendingOrdering(t *testing.T) {
 	if len(pending) != 3 {
 		t.Fatalf("pending = %d", len(pending))
 	}
-	if pending[0].Link.Hash != three.Hash || pending[1].Link.Hash != one.Hash || pending[2].Link.Hash != two.Hash {
+	// Untested catalog entries sort before failed retries even when the
+	// retry has a lower measured latency.
+	if pending[0].Link.Hash != one.Hash || pending[1].Link.Hash != two.Hash || pending[2].Link.Hash != three.Hash {
 		t.Fatalf("pending order = %s,%s,%s", pending[0].Link.Hash, pending[1].Link.Hash, pending[2].Link.Hash)
 	}
-	if limited := store.Pending(2); len(limited) != 2 || limited[0].Link.Hash != three.Hash {
+	if limited := store.Pending(2); len(limited) != 2 || limited[0].Link.Hash != one.Hash {
 		t.Fatalf("limited pending = %+v", limited)
 	}
 

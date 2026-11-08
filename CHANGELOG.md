@@ -16,6 +16,9 @@
 - A cycle is bounded by `test.real_test_cap` and a 20-minute launch budget, so
   a large catalog cannot keep one cycle (and the load it creates) running for
   hours.
+- Untested catalog entries are queued before failed retries, so a bounded
+  per-cycle test cap still sweeps the catalog instead of retesting the same
+  low-latency failures.
 - The failed-replacement cooldown is 90 seconds instead of five minutes.
 
 ## v0.1.1 — 2026-10-27
