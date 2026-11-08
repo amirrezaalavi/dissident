@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- WAN replacement can no longer lose every ready standby while a
+  qualification cycle is running: promotion uses its own slot instead of
+  queueing behind the bulk test pool, and a promotion timeout keeps the
+  candidate ready instead of marking it failed.
+- Standby liveness requires two consecutive TCP failures and ignores local DNS
+  lookup failures, so a resolver stall during a cycle cannot empty the
+  failover pool.
+- Speed liveness replaces the active route only after two successful
+  below-minimum samples; a failed speed probe no longer churns the route.
+- A cycle is bounded by `test.real_test_cap` and a 20-minute launch budget, so
+  a large catalog cannot keep one cycle (and the load it creates) running for
+  hours.
+- The failed-replacement cooldown is 90 seconds instead of five minutes.
+
 ## v0.1.1 — 2026-10-27
 
 ### Added
