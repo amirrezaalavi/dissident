@@ -149,6 +149,7 @@ type Manager struct {
 	probeFails    int
 	speedFails    int
 	readyFails    map[string]int
+	promoteFails  map[string]int
 	nextReplaceAt time.Time
 	cycleCancel   context.CancelFunc
 	launchCtx     context.Context
@@ -201,14 +202,15 @@ func New(opts Options) *Manager {
 		store = catalog.New()
 	}
 	m := &Manager{
-		catalog:    store,
-		tester:     opts.Tester,
-		config:     cfg,
-		logger:     logger,
-		stateFile:  opts.StateFile,
-		failures:   make(map[string][]time.Time),
-		readyFails: make(map[string]int),
-		now:        time.Now,
+		catalog:      store,
+		tester:       opts.Tester,
+		config:       cfg,
+		logger:       logger,
+		stateFile:    opts.StateFile,
+		failures:     make(map[string][]time.Time),
+		readyFails:   make(map[string]int),
+		promoteFails: make(map[string]int),
+		now:          time.Now,
 	}
 	if m.stateFile == "" && cfg != nil {
 		if cur := cfg.Current(); cur != nil {

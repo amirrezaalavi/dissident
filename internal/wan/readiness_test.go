@@ -63,10 +63,12 @@ func TestReadyLivenessDropsFailedAndKeepsGood(t *testing.T) {
 		}
 	}
 
-	m.checkReadyOnce(context.Background())
-	// One failed 3 s dial is not enough evidence: the standby stays.
-	if hashes := readyHashes(m); len(hashes) != 2 {
-		t.Fatalf("after one failure ready = %v, want both standbys kept", hashes)
+	for i := 0; i < readyFailureThreshold-1; i++ {
+		m.checkReadyOnce(context.Background())
+		// One failed 3 s dial is not enough evidence: the standby stays.
+		if hashes := readyHashes(m); len(hashes) != 2 {
+			t.Fatalf("after %d failures ready = %v, want both standbys kept", i+1, hashes)
+		}
 	}
 	m.checkReadyOnce(context.Background())
 
@@ -90,8 +92,8 @@ func TestReadyLivenessDropsFailedAndKeepsGood(t *testing.T) {
 	mu.Lock()
 	gotDialed := append([]string(nil), dialed...)
 	mu.Unlock()
-	if len(gotDialed) != 4 {
-		t.Fatalf("dialed = %v, want four TCP checks (two passes over two standbys)", gotDialed)
+	if len(gotDialed) != 2*readyFailureThreshold {
+		t.Fatalf("dialed = %v, want %d TCP checks (%d passes over two standbys)", gotDialed, 2*readyFailureThreshold, readyFailureThreshold)
 	}
 
 	data, err := os.ReadFile(m.statePath())
@@ -204,8 +206,9 @@ func TestReadyLivenessUsesConfiguredEgressDialerOnly(t *testing.T) {
 		}, nil
 	}
 
-	m.checkReadyOnce(context.Background())
-	m.checkReadyOnce(context.Background())
+	for i := 0; i < readyFailureThreshold; i++ {
+		m.checkReadyOnce(context.Background())
+	}
 
 	mu.Lock()
 	gotDirect, gotBuilds, gotEgress := directCalls, egressBuilds, egressCalls
@@ -213,8 +216,8 @@ func TestReadyLivenessUsesConfiguredEgressDialerOnly(t *testing.T) {
 	if gotDirect != 0 {
 		t.Fatalf("direct dials = %d, want 0 when egress is configured", gotDirect)
 	}
-	if gotBuilds != 2 || gotEgress != 2 {
-		t.Fatalf("egress builds/calls = %d/%d, want 2/2", gotBuilds, gotEgress)
+	if gotBuilds != readyFailureThreshold || gotEgress != readyFailureThreshold {
+		t.Fatalf("egress builds/calls = %d/%d, want %d/%d", gotBuilds, gotEgress, readyFailureThreshold, readyFailureThreshold)
 	}
 	if hashes := readyHashes(m); len(hashes) != 0 {
 		t.Fatalf("ready = %v, want failed egress entry removed", hashes)

@@ -6,9 +6,10 @@
 
 - WAN replacement can no longer lose every ready standby while a
   qualification cycle is running: promotion uses its own slot instead of
-  queueing behind the bulk test pool, and a promotion timeout keeps the
-  candidate ready instead of marking it failed.
-- Standby liveness requires two consecutive TCP failures and ignores local DNS
+  queueing behind the bulk test pool; a promotion timeout keeps the candidate
+  ready, and a candidate is evicted only after three consecutive failed
+  promotions.
+- Standby liveness requires three consecutive TCP failures and ignores local DNS
   lookup failures, so a resolver stall during a cycle cannot empty the
   failover pool.
 - Speed liveness replaces the active route only after two successful

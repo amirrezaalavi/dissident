@@ -20,7 +20,7 @@ const (
 	// readyFailureThreshold is the number of consecutive cheap TCP failures
 	// before a standby is evicted. A single 3 s dial under test load is far
 	// too weak to declare a qualified link dead.
-	readyFailureThreshold = 2
+	readyFailureThreshold = 3
 )
 
 // readyLivenessLoop periodically checks standby metadata with a cheap TCP

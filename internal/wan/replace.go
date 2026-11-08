@@ -10,6 +10,8 @@ import (
 	"dissident/internal/xraycfg"
 )
 
+const promotionFailureThreshold = 3
+
 // errPromotionTimeout marks an attempt that ran out of time without proving
 // the candidate itself bad. Local saturation or a busy test pool must not be
 // allowed to evict a standby that already passed qualification.
@@ -91,8 +93,26 @@ func (m *Manager) Replace(ctx context.Context) error {
 					"hash", cand.Link.Hash, "err", err)
 				continue
 			}
+			// A single failed promotion is weak evidence: an upstream blip
+			// makes every candidate fail at once. Evict only after repeated
+			// failures, so one bad minute cannot empty the failover pool.
+			m.mu.Lock()
+			if m.promoteFails == nil {
+				m.promoteFails = make(map[string]int)
+			}
+			m.promoteFails[cand.Link.Hash]++
+			fails := m.promoteFails[cand.Link.Hash]
+			m.mu.Unlock()
+			if fails < promotionFailureThreshold {
+				m.logger.Warn("wan: promotion failed; keeping candidate",
+					"hash", cand.Link.Hash, "failures", fails, "err", err)
+				continue
+			}
+			m.mu.Lock()
+			delete(m.promoteFails, cand.Link.Hash)
+			m.mu.Unlock()
 			m.logger.Warn("wan: promotion failed after verification fallback",
-				"hash", cand.Link.Hash, "err", err)
+				"hash", cand.Link.Hash, "failures", fails, "err", err)
 			m.dropReady(cand.Link, contract.Result{
 				Hash: cand.Link.Hash, Stage: contract.StageReal, OK: false,
 				Reason: err.Error(), At: m.now().UTC(),
@@ -305,6 +325,7 @@ func (m *Manager) removeReadyLocked(hash string) {
 		return
 	}
 	delete(m.readyFails, hash)
+	delete(m.promoteFails, hash)
 	out := m.ready[:0]
 	for _, r := range m.ready {
 		if r.Link.Hash != hash {
