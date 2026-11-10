@@ -118,15 +118,20 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 		}
 	}
 
+	fetchStart := m.now()
 	links, sourceErrs, fetchErr := catalog.LoadSources(cycleCtx, cfg.Paths.URLsFile, fetchTimeout)
 	if fetchErr != nil {
 		// Missing/unreadable source file: keep serving and keep ready.
 		cycleErr = fmt.Errorf("wan: cycle: load sources: %w", fetchErr)
-		m.logger.Warn("wan: cycle source fetch failed; keeping last-known-good", "err", fetchErr)
-	} else if len(sourceErrs) > 0 {
-		// Large public subscriptions contain thousands of unsupported or
-		// malformed lines. Log a bounded sample instead of one warning per
-		// line on every cycle.
+		m.logger.Warn("wan: cycle source fetch failed; keeping last-known-good",
+			"err", fetchErr, "links", len(links), "source_errors", len(sourceErrs),
+			"elapsed", m.now().Sub(fetchStart).Round(time.Millisecond))
+	}
+	// Large public subscriptions contain thousands of unsupported or malformed
+	// lines. Log a bounded sample instead of one warning per line on every
+	// cycle. The per-source detail is also the only clue when every fetch
+	// failed, so it is logged for the aggregate-error case too.
+	if len(sourceErrs) > 0 {
 		const maxLoggedSourceErrors = 20
 		limit := len(sourceErrs)
 		if limit > maxLoggedSourceErrors {
