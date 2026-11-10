@@ -247,3 +247,24 @@ func TestStoreRecentConcurrentUse(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestStoreRecentKeepsExcludedVisible(t *testing.T) {
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	store := New()
+	store.entries = make(map[string]*contract.Entry)
+	for i := 0; i < 500; i++ {
+		hash := fmt.Sprintf("catalog-%03d", i)
+		store.entries[hash] = recentTestEntry(hash, contract.StateCatalog, base.Add(-time.Duration(i)*time.Minute), 1)
+	}
+	store.entries["excluded-old"] = recentTestEntry("excluded-old", contract.StateExcluded, base.Add(-100*time.Hour), 1)
+
+	found := false
+	for _, entry := range store.Recent(50) {
+		if entry.Link.Hash == "excluded-old" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("operator-excluded entry was pushed out of the bounded recent list")
+	}
+}

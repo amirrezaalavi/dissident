@@ -450,11 +450,11 @@ func entryRank(s contract.EntryState) int {
 		return 1
 	case contract.StateReady:
 		return 2
-	case contract.StateCatalog:
-		return 3
-	case contract.StateFailed:
-		return 4
 	case contract.StateExcluded:
+		return 3
+	case contract.StateCatalog:
+		return 4
+	case contract.StateFailed:
 		return 5
 	case contract.StateUnsupported:
 		return 6

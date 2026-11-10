@@ -188,11 +188,13 @@ func recentStateRank(state contract.EntryState) int {
 		return 1
 	case contract.StateReady:
 		return 2
-	case contract.StateCatalog:
-		return 3
-	case contract.StateFailed:
-		return 4
+	// Excluded entries are few and operator-relevant, so they stay above the
+	// catalog instead of being pushed out of the bounded recent list.
 	case contract.StateExcluded:
+		return 3
+	case contract.StateCatalog:
+		return 4
+	case contract.StateFailed:
 		return 5
 	case contract.StateUnsupported:
 		return 6
@@ -407,11 +409,11 @@ func stateRank(state contract.EntryState) int {
 		return 1
 	case contract.StateTesting:
 		return 2
-	case contract.StateCatalog:
-		return 3
-	case contract.StateFailed:
-		return 4
 	case contract.StateExcluded:
+		return 3
+	case contract.StateCatalog:
+		return 4
+	case contract.StateFailed:
 		return 5
 	case contract.StateUnsupported:
 		return 6
