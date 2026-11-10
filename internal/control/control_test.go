@@ -55,12 +55,14 @@ type fakeData struct {
 
 	replaceErr   error
 	removeErr    error
+	restoreErr   error
 	addErr       error
 	removeSubErr error
 	runErr       error
 
 	replaceCalls    int
 	removeCalls     int
+	restoreCalls    int
 	runCalls        int
 	runNowCalls     int
 	cancelCalls     int
@@ -72,6 +74,7 @@ type fakeData struct {
 	testedLimit     int
 	replaceDeadline bool
 	removeHash      string
+	restoreHash     string
 	addArg          string
 	removeSubArg    string
 
@@ -217,6 +220,15 @@ func (f *fakeData) RemoveReady(hash string) error {
 	f.removeCalls++
 	f.removeHash = hash
 	err := f.removeErr
+	f.mu.Unlock()
+	return err
+}
+
+func (f *fakeData) RestoreExcluded(hash string) error {
+	f.mu.Lock()
+	f.restoreCalls++
+	f.restoreHash = hash
+	err := f.restoreErr
 	f.mu.Unlock()
 	return err
 }
@@ -526,7 +538,7 @@ func TestPagesRenderAndRedact(t *testing.T) {
 		wants []string
 	}{
 		{"/", []string{"Overview", "Active WAN", "tokyo-1", "Config generation", "http-equiv=\"refresh\"", "Top ready entries", "Recent test results", "Provider mix", "Failure domains"}},
-		{"/wan", []string{"Replace active", "Ready standbys", "Remove", "tokyo-1", "osaka-2", "Provider mix", "Failure domains"}},
+		{"/wan", []string{"Replace active", "Ready standbys", "Drop", "Excluded links", "tokyo-1", "osaka-2", "Provider mix", "Failure domains"}},
 		{"/tests", []string{"Run cycle", "Cancel", "Qualification results", "tls", "Catalog entries"}},
 		{"/subscriptions", []string{"Subscriptions", "Add subscription", "2 local links", "https://subs.example/plain.txt"}},
 		{"/settings", []string{"Settings", "server.panel_listen", "SIGHUP", "urls.probe"}},
@@ -829,6 +841,7 @@ func TestMetrics(t *testing.T) {
 		"dissident_config_generation 12",
 		"dissident_active_wan 1",
 		"dissident_ready_entries 2",
+		"dissident_excluded_entries 0",
 		"dissident_ready_provider{provider=\"cloudflare\"} 0",
 		"dissident_ready_provider{provider=\"non-cloudflare\"} 0",
 		"dissident_ready_provider{provider=\"unknown\"} 2",
@@ -1065,5 +1078,66 @@ func TestReloadRejectsListenChange(t *testing.T) {
 	other.Cycle.Interval = 5 * time.Minute
 	if err := server.Reload(&config.Snapshot{Generation: 4, Config: other}); err != nil {
 		t.Fatalf("Reload other changes: %v", err)
+	}
+}
+
+func TestWANRestoreAction(t *testing.T) {
+	fake := newFakeData(testSnapshot(t))
+	link := testLink()
+	fake.snap.Excluded = []contract.Link{link}
+	handler := newTestServer(t, Options{Data: fake, Config: testConfig(t)}).Handler()
+
+	rec := postForm(t, handler, "/wan/restore", url.Values{"hash": []string{link.Hash[:12]}}, nil)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("restore status = %d, want 303: %s", rec.Code, rec.Body.String())
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loc.Path != "/wan" || loc.Query().Get("msg") != "excluded entry restored; the next cycle will retest it" {
+		t.Fatalf("restore redirect = %q", rec.Header().Get("Location"))
+	}
+	fake.mu.Lock()
+	gotHash, calls := fake.restoreHash, fake.restoreCalls
+	fake.mu.Unlock()
+	if calls != 1 || gotHash != link.Hash {
+		t.Fatalf("RestoreExcluded(%q) calls = %d, want full hash once", gotHash, calls)
+	}
+
+	rec = postForm(t, handler, "/wan/restore", url.Values{"hash": []string{"ffffffffffff"}}, nil)
+	loc, _ = url.Parse(rec.Header().Get("Location"))
+	if loc.Query().Get("err") != "1" {
+		t.Fatalf("unknown restore was not an error flash: %q", loc.String())
+	}
+
+	rec = postForm(t, handler, "/wan/restore", url.Values{"hash": []string{link.Hash[:12]}},
+		map[string]string{"Sec-Fetch-Site": "cross-site"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site restore status = %d, want 403", rec.Code)
+	}
+}
+
+func TestWANPageListsExcludedLinks(t *testing.T) {
+	fake := newFakeData(testSnapshot(t))
+	link := testLink()
+	fake.snap.Excluded = []contract.Link{link}
+	handler := newTestServer(t, Options{Data: fake, Config: testConfig(t)}).Handler()
+
+	rec := serve(t, handler, http.MethodGet, "/wan")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wan status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Excluded links",
+		`action="/wan/restore"`,
+		`value="` + link.Hash[:12] + `"`,
+		"Restore",
+		">Drop<",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("WAN page missing %q", want)
+		}
 	}
 }

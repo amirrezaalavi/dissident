@@ -20,7 +20,10 @@ type persistedState struct {
 	Version int              `json:"version"`
 	Active  *contract.Active `json:"active,omitempty"`
 	Ready   []contract.Ready `json:"ready,omitempty"`
-	SavedAt time.Time        `json:"saved_at,omitempty"`
+	// Excluded holds operator-dropped links. They are kept across restarts so
+	// a manual remove is not undone by a service restart.
+	Excluded []contract.Link `json:"excluded,omitempty"`
+	SavedAt  time.Time       `json:"saved_at,omitempty"`
 }
 
 const (
@@ -72,6 +75,7 @@ func (m *Manager) loadState() persistedState {
 	}
 	out.Ready = dedupeReady(out.Ready)
 	sortReady(out.Ready)
+	out.Excluded = dedupeLinks(out.Excluded)
 	return out
 }
 
@@ -91,10 +95,11 @@ func (m *Manager) saveState() error {
 
 	m.mu.Lock()
 	ps := persistedState{
-		Version: stateVersion,
-		Active:  m.activeMetaLocked(),
-		Ready:   cloneReady(m.ready),
-		SavedAt: m.now().UTC(),
+		Version:  stateVersion,
+		Active:   m.activeMetaLocked(),
+		Ready:    cloneReady(m.ready),
+		Excluded: m.excludedLinksLocked(),
+		SavedAt:  m.now().UTC(),
 	}
 	m.mu.Unlock()
 

@@ -37,6 +37,9 @@ const (
 	StateActive      EntryState = "active"
 	StateFailed      EntryState = "failed"
 	StateUnsupported EntryState = "unsupported"
+	// StateExcluded marks a link an operator removed from the ready pool. It
+	// stays out of qualification until it is explicitly restored.
+	StateExcluded EntryState = "excluded"
 )
 
 // Stage is one step of the qualification pipeline.
@@ -138,7 +141,10 @@ type Snapshot struct {
 	SupportedCount int
 	Testing        int
 	Diversity      Diversity
-	Updated        time.Time
+	// Excluded lists operator-dropped links, newest first. They are not part
+	// of the ready pool and are skipped by cycles until restored.
+	Excluded []Link
+	Updated  time.Time
 }
 
 // AccessRecord is one proxy access-log record. Credentials must never be

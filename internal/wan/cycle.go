@@ -143,6 +143,10 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 		added := m.catalog.Merge(links)
 		m.logger.Info("wan: cycle merged sources", "links", len(links), "added", added)
 	}
+	// Fresh entries may include an operator-dropped link (state is per-process
+	// and merged again after restart). Reclassify before building the queue so
+	// Pending never hands it to a worker.
+	m.markExcludedInCatalog()
 
 	if !force && m.hasActive() && m.readyCount() >= target {
 		// The ready target is met, but a Cloudflare-only pool may still be
@@ -169,6 +173,7 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 		activeHash = m.active.meta.Link.Hash
 	}
 	readyHashes := m.readyHashesLocked()
+	excludedHashes := m.excludedHashesLocked()
 	m.mu.Unlock()
 
 	now := m.now().UTC()
@@ -191,6 +196,9 @@ func (m *Manager) runCycle(ctx context.Context, force bool) error {
 			continue
 		}
 		if _, ok := readyHashes[entry.Link.Hash]; ok {
+			continue
+		}
+		if _, ok := excludedHashes[entry.Link.Hash]; ok {
 			continue
 		}
 		if entry.State == contract.StateFailed && cooldown > 0 && now.Sub(entry.Updated) < cooldown {

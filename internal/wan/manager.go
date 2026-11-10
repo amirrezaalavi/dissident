@@ -166,11 +166,14 @@ type Manager struct {
 	logger    *slog.Logger
 	stateFile string
 
-	mu            sync.Mutex
-	saveMu        sync.Mutex
-	subsMu        sync.Mutex
-	active        *activeWAN
-	ready         []contract.Ready
+	mu     sync.Mutex
+	saveMu sync.Mutex
+	subsMu sync.Mutex
+	active *activeWAN
+	ready  []contract.Ready
+	// excluded holds links an operator dropped from the ready pool. They are
+	// persisted in the state file and skipped by qualification until restored.
+	excluded      map[string]contract.Link
 	lastCycle     time.Time
 	nextCycle     time.Time
 	lastError     string
@@ -251,6 +254,7 @@ func New(opts Options) *Manager {
 		logger:          logger,
 		stateFile:       opts.StateFile,
 		failures:        make(map[string][]time.Time),
+		excluded:        make(map[string]contract.Link),
 		readyFails:      make(map[string]int),
 		promoteFails:    make(map[string]int),
 		passiveGrace:    passiveGracePeriod,
@@ -414,6 +418,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	m.ready = ready
 	m.mu.Unlock()
+	m.installPersistedExclusions(ps)
 
 	var restoreErr error
 	if ps.Active != nil {
@@ -710,6 +715,7 @@ func (m *Manager) Snapshot() contract.Snapshot {
 		active = &meta
 	}
 	ready := cloneReady(m.ready)
+	excluded := m.excludedLinksLocked()
 	shortfall := m.diversityShortfall
 	shortfallEvents := m.diversityShortfallEvents
 	lastShortfall := m.lastDiversityShortfall
@@ -727,6 +733,7 @@ func (m *Manager) Snapshot() contract.Snapshot {
 		SupportedCount: supported,
 		Testing:        testing,
 		Diversity:      diversityStats(ready, shortfall, shortfallEvents, lastShortfall),
+		Excluded:       excluded,
 		Updated:        m.now().UTC(),
 	}
 }

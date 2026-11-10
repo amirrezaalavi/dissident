@@ -176,6 +176,17 @@ func (m *Manager) installActive(cand contract.Ready, p process) error {
 	if old != nil && old.proc != nil {
 		m.scheduleDrain(old.proc)
 	}
+	// A replaced active is not a bad link by definition: it may have been
+	// swapped after a transient liveness or speed failure. Returning it to the
+	// catalog (with its result and score preserved) lets a later cycle
+	// requalify and reuse it instead of silently retiring every link that ever
+	// served.
+	if old != nil {
+		oldHash := old.meta.Link.Hash
+		if oldHash != "" && oldHash != cand.Link.Hash {
+			m.markCatalogState(oldHash, contract.StateCatalog, "previous active returned to catalog")
+		}
+	}
 	return nil
 }
 
@@ -316,9 +327,11 @@ func (m *Manager) RemoveReady(hash string) error {
 		return errors.New("wan: remove ready: link is the active WAN")
 	}
 	found := false
+	var removed contract.Link
 	for _, r := range m.ready {
 		if r.Link.Hash == hash {
 			found = true
+			removed = cloneLink(r.Link)
 			break
 		}
 	}
@@ -327,12 +340,48 @@ func (m *Manager) RemoveReady(hash string) error {
 		return fmt.Errorf("wan: remove ready: %q is not ready", hash)
 	}
 	m.removeReadyLocked(hash)
+	if m.excluded == nil {
+		m.excluded = make(map[string]contract.Link)
+	}
+	m.excluded[hash] = removed
 	m.mu.Unlock()
+
+	// Keep the catalog consistent with the pool: without this the Tests page
+	// still calls the link "ready" and Pending can never reconsider it.
+	m.markCatalogState(hash, contract.StateExcluded, excludedReason)
 	if err := m.saveState(); err != nil {
 		return err
 	}
-	m.logger.Info("wan: removed ready link", "hash", hash)
+	m.logger.Info("wan: excluded ready link", "hash", hash)
 	m.maybeTriggerRefill("ready removed")
+	return nil
+}
+
+// RestoreExcluded removes one operator exclusion and returns the link to the
+// catalog so a later cycle can requalify it. Unknown hashes are an error so the
+// control plane can report a stale action.
+func (m *Manager) RestoreExcluded(hash string) error {
+	if hash == "" {
+		return errors.New("wan: restore excluded: empty hash")
+	}
+	m.mu.Lock()
+	if _, ok := m.excluded[hash]; !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("wan: restore excluded: %q is not excluded", hash)
+	}
+	if m.active != nil && m.active.meta.Link.Hash == hash {
+		m.mu.Unlock()
+		return errors.New("wan: restore excluded: link is the active WAN")
+	}
+	delete(m.excluded, hash)
+	m.mu.Unlock()
+
+	m.markCatalogState(hash, contract.StateCatalog, "restored by operator")
+	if err := m.saveState(); err != nil {
+		return err
+	}
+	m.logger.Info("wan: restored excluded link", "hash", hash)
+	m.maybeTriggerRefill("excluded link restored")
 	return nil
 }
 

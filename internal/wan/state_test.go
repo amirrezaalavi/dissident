@@ -271,3 +271,38 @@ func TestStopStopsActiveAndPersistsLinks(t *testing.T) {
 		t.Fatalf("Start after Stop = %v, want errStopped", err)
 	}
 }
+
+func TestStartRestoresOperatorExclusions(t *testing.T) {
+	m, _, store := testManager(t, nil)
+	dropped := testLink("dropped-at-restart")
+	keep := testLink("keep-at-restart")
+	store.Merge([]contract.Link{dropped, keep})
+	state := persistedState{
+		Version: stateVersion,
+		Ready: []contract.Ready{
+			testReady("dropped-at-restart", 2),
+			testReady("keep-at-restart", 1),
+		},
+		Excluded: []contract.Link{dropped},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.statePath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(m.ExcludedLinks()) != 1 || m.ExcludedLinks()[0].Hash != "dropped-at-restart" {
+		t.Fatalf("excluded links = %+v", m.ExcludedLinks())
+	}
+	if hashes := readyHashes(m); len(hashes) != 1 || hashes[0] != "keep-at-restart" {
+		t.Fatalf("ready = %v, want only keep-at-restart", hashes)
+	}
+	if entry := entryByHash(t, store, "dropped-at-restart"); entry.State != contract.StateExcluded {
+		t.Fatalf("catalog state = %q, want excluded", entry.State)
+	}
+}

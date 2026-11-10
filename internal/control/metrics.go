@@ -72,6 +72,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeMetric("dissident_config_generation", "Current accepted configuration generation.", "gauge", snap.Generation)
 	writeMetric("dissident_active_wan", "Whether an active WAN is installed (0 or 1).", "gauge", active)
 	writeMetric("dissident_ready_entries", "Number of standby links ready for promotion.", "gauge", len(snap.Ready))
+	writeMetric("dissident_excluded_entries", "Number of operator-dropped links kept out of the pool.", "gauge", len(snap.Excluded))
 	fmt.Fprintf(&b, "# HELP dissident_ready_provider Ready standbys by provider class.\n")
 	fmt.Fprintf(&b, "# TYPE dissident_ready_provider gauge\n")
 	fmt.Fprintf(&b, "dissident_ready_provider{provider=\"cloudflare\"} %d\n", diversity.ReadyCloudflare)

@@ -343,6 +343,38 @@ type readyRow struct {
 	CanRemove  bool
 }
 
+// excludedRow is one operator-dropped link shown with a Restore action.
+type excludedRow struct {
+	Name       string
+	ServerPort string
+	Protocol   string
+	Provider   string
+	Domain     string
+	HashPrefix string
+	CanRestore bool
+}
+
+func excludedRows(links []contract.Link, canRestore bool) []excludedRow {
+	rows := make([]excludedRow, 0, len(links))
+	for _, link := range links {
+		prefix := hashPrefix(link.Hash)
+		domain := provider.PrefixKey(link)
+		if domain == "" {
+			domain = "-"
+		}
+		rows = append(rows, excludedRow{
+			Name:       displayName(link),
+			ServerPort: hostPort(link),
+			Protocol:   protocolLabel(link.Protocol),
+			Provider:   string(provider.ClassifyLink(link)),
+			Domain:     domain,
+			HashPrefix: prefix,
+			CanRestore: canRestore && prefix != "",
+		})
+	}
+	return rows
+}
+
 func sortedReady(ready []contract.Ready) []contract.Ready {
 	out := append([]contract.Ready(nil), ready...)
 	sort.SliceStable(out, func(i, j int) bool {
@@ -422,10 +454,12 @@ func entryRank(s contract.EntryState) int {
 		return 3
 	case contract.StateFailed:
 		return 4
-	case contract.StateUnsupported:
+	case contract.StateExcluded:
 		return 5
-	default:
+	case contract.StateUnsupported:
 		return 6
+	default:
+		return 7
 	}
 }
 

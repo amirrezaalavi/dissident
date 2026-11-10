@@ -192,10 +192,12 @@ func recentStateRank(state contract.EntryState) int {
 		return 3
 	case contract.StateFailed:
 		return 4
-	case contract.StateUnsupported:
+	case contract.StateExcluded:
 		return 5
-	default:
+	case contract.StateUnsupported:
 		return 6
+	default:
+		return 7
 	}
 }
 
@@ -409,10 +411,12 @@ func stateRank(state contract.EntryState) int {
 		return 3
 	case contract.StateFailed:
 		return 4
-	case contract.StateUnsupported:
+	case contract.StateExcluded:
 		return 5
-	default:
+	case contract.StateUnsupported:
 		return 6
+	default:
+		return 7
 	}
 }
 

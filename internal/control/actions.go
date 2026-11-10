@@ -60,6 +60,32 @@ func (s *Server) handleWANRemove(w http.ResponseWriter, r *http.Request) {
 	s.redirectFlash(w, r, "/wan", "ready entry removed", false)
 }
 
+// handleWANRestore returns an operator-dropped link to the catalog so a later
+// cycle can requalify it. Dropping is explicit, so restoring is too.
+func (s *Server) handleWANRestore(w http.ResponseWriter, r *http.Request) {
+	if s.rejectCrossSite(w, r) {
+		return
+	}
+	if !s.requireData(w, r, "/wan") {
+		return
+	}
+	if err := parseActionForm(w, r); err != nil {
+		s.redirectFlash(w, r, "/wan", "invalid form submission", true)
+		return
+	}
+	full, err := s.resolveExcludedHash(r.FormValue("hash"))
+	if err != nil {
+		s.redirectFlash(w, r, "/wan", err.Error(), true)
+		return
+	}
+	if err := s.opts.Data.RestoreExcluded(full); err != nil {
+		s.opts.Logger.Warn("control restore excluded failed", "err", sanitizeMessage(err.Error()))
+		s.redirectFlash(w, r, "/wan", "restore failed: "+err.Error(), true)
+		return
+	}
+	s.redirectFlash(w, r, "/wan", "excluded entry restored; the next cycle will retest it", false)
+}
+
 func (s *Server) handleCycleRun(w http.ResponseWriter, r *http.Request) {
 	if s.rejectCrossSite(w, r) {
 		return

@@ -9,6 +9,9 @@
 - Trusted promotion for a freshly qualified standby (render/start/verify only)
   and coverage-first selection of untested catalog entries.
 - Manual cycle batches and recently-tested rows in the panel.
+- Operator exclusions: dropping a ready standby records it as `excluded`
+  (persisted in the state file, shown on the WAN page, counted in metrics) and
+  a Restore action returns it to the catalog for requalification.
 
 ### Fixed
 
@@ -23,6 +26,12 @@
 - Cancelling a cycle requeues in-flight candidates instead of blacklisting
   them, and local DNS failures during qualification are transient.
 - A cycle is bounded by `test.real_test_cap` and a 20-minute launch budget.
+- A dropped standby no longer lingers as `ready` in the catalog/Tests page,
+  and re-merging sources or restarting the service cannot quietly requalify
+  it before an explicit Restore.
+- When the active WAN is replaced, the previous link returns to the catalog
+  with its result and score instead of staying `active` forever; cycling
+  actives can therefore be requalified and reused.
 
 ## v0.1.1 — 2026-10-27
 

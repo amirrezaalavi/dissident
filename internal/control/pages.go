@@ -69,6 +69,7 @@ type wanPage struct {
 	ReadyMin    int
 	Diversity   contract.Diversity
 	CanReplace  bool
+	Excluded    []excludedRow
 }
 
 func (s *Server) handleWAN(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +84,7 @@ func (s *Server) handleWAN(w http.ResponseWriter, r *http.Request) {
 		ReadyMin:    s.readyMin(),
 		Diversity:   diversityView(snap),
 		CanReplace:  hasData && len(snap.Ready) > 0,
+		Excluded:    excludedRows(snap.Excluded, hasData),
 	}
 	if !hasData {
 		p.Notice = "No runtime data provider is attached; WAN actions are disabled in read-only Snapshot mode."

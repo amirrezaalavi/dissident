@@ -1,6 +1,6 @@
 {{define "content"}}
 <h1>WAN</h1>
-<p class="muted">One active WAN with qualified standbys. Replacement is make-before-break; the only WAN actions are Replace and Remove-ready.</p>
+<p class="muted">One active WAN with qualified standbys. Replacement is make-before-break. Dropping a standby excludes it from the pool (also across restarts); restore it here to let a cycle requalify it.</p>
 
 <section class="card">
   <h2>Active WAN</h2>
@@ -49,7 +49,7 @@
           <td>
             <form class="inline" method="post" action="/wan/remove">
               <input type="hidden" name="hash" value="{{.HashPrefix}}">
-              <button type="submit" class="danger"{{if not .CanRemove}} disabled{{end}}>Remove</button>
+              <button type="submit" class="danger"{{if not .CanRemove}} disabled{{end}}>Drop</button>
             </form>
           </td>
         </tr>
@@ -59,6 +59,37 @@
   </div>
   {{else}}
   <p class="muted">No ready standbys. Run a qualification cycle from the <a href="/tests">Tests</a> page.</p>
+  {{end}}
+</section>
+
+<section class="card">
+  <h2>Excluded links <span class="muted">({{len .Excluded}})</span></h2>
+  <p class="muted">Dropped by an operator. They stay out of qualification and the ready pool across restarts; restore one to return it to the catalog for the next cycle.</p>
+  {{if .Excluded}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Server</th><th>Protocol</th><th>Provider</th><th>Domain</th><th>Action</th></tr></thead>
+      <tbody>
+      {{range .Excluded}}
+        <tr>
+          <td>{{.Name}}</td>
+          <td>{{.ServerPort}}</td>
+          <td>{{.Protocol}}</td>
+          <td>{{.Provider}}</td>
+          <td>{{.Domain}}</td>
+          <td>
+            <form class="inline" method="post" action="/wan/restore">
+              <input type="hidden" name="hash" value="{{.HashPrefix}}">
+              <button type="submit"{{if not .CanRestore}} disabled{{end}}>Restore</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted">No links are excluded.</p>
   {{end}}
 </section>
 {{end}}

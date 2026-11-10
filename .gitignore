@@ -8,3 +8,4 @@ dist/
 
 # Dissident runtime state, logs, and downloaded artifacts
 var/
+.gocache/

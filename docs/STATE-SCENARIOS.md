@@ -13,7 +13,7 @@ live fault injection or code work.
 | Live lab (separate VM or netns) | Dead/TLS-broken/slow/flapping candidates, DNS and source outages, process kills, restarts | not automated; commands below |
 | Production | Real traffic, long-lived connections, real subscription churn | monitor only; do not inject faults without a window |
 
-Current automated suite: **253 tests**. `go test -race` is clean for the
+Current automated suite: **260 tests**. `go test -race` is clean for the
 concurrency-heavy packages (`wan`, `proxy`, `qualify`).
 
 Coverage (`go test -cover ./...`):
@@ -65,6 +65,8 @@ Automated scenarios live in `internal/wan/scenario_test.go`.
 | 6 | DNS resolver fails during qualification | Entry stays eligible; no 30m cooldown | `TestScenarioDNSFailureDoesNotBlacklist` | pass |
 | 7 | Plain TCP refusal | Entry is marked failed and cooled down | `TestScenarioHardTCPFailureStillBlacklists` | pass |
 | 8 | xray alive, tunnel dead | Cycle queues a standby; failover waits for 3 failed probes + cooldown | `TestScenarioTunnelDeadProcessAlive` | pass (known latency) |
+| 9 | Operator drops a ready standby | It leaves the pool and is marked `excluded`; the exclusion survives a restart and no cycle requalifies it until restored | `TestScenarioOperatorDropSurvivesRestart` | pass |
+| 10 | Active WAN is replaced | The previous active returns to `catalog` (result and score preserved) instead of being retired forever | `TestReplaceRecyclesPreviousActive` | pass |
 | 9 | Active tunnel fails, ready > 0 | 3 consecutive probe failures → Replace → standby promoted | `TestProbeFailuresAcrossLivenessIntervalsReplace` | pass |
 | 10 | Active speed drops | Two successful below-minimum samples → Replace; probe errors do not replace | `internal/wan` speed tests | pass |
 | 11 | Ready standby unreachable | 3 consecutive dial failures → evicted; DNS failures never evict | `TestReadyLivenessDropsFailedAndKeepsGood`, `...KeepsStandbyOnDNSFailure` | pass |

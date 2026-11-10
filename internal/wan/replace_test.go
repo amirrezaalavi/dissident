@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"dissident/internal/catalog"
 	"dissident/internal/config"
 	"dissident/internal/contract"
 )
@@ -327,4 +328,143 @@ func TestRemoveReady(t *testing.T) {
 	if len(saved.Ready) != 2 {
 		t.Fatalf("persisted ready = %d, want 2", len(saved.Ready))
 	}
+}
+
+func TestRemoveReadyExcludesLink(t *testing.T) {
+	m, fr, store := testManager(t, nil)
+	store.Merge([]contract.Link{testLink("drop-me"), testLink("keep"), testLink("fresh")})
+	setActive(t, m, testLink("live"), 30110)
+	setReady(m, testReady("drop-me", 2), testReady("keep", 1))
+
+	if err := m.RemoveReady("drop-me"); err != nil {
+		t.Fatalf("RemoveReady: %v", err)
+	}
+
+	entry := entryByHash(t, store, "drop-me")
+	if entry.State != contract.StateExcluded {
+		t.Fatalf("catalog state = %q, want excluded", entry.State)
+	}
+	if entry.Last.Reason == "" {
+		t.Fatal("excluded entry has no operator reason")
+	}
+	snap := m.Snapshot()
+	if len(snap.Excluded) != 1 || snap.Excluded[0].Hash != "drop-me" {
+		t.Fatalf("snapshot excluded = %+v", snap.Excluded)
+	}
+	for _, e := range store.Pending(0) {
+		if e.Link.Hash == "drop-me" {
+			t.Fatal("excluded link is still offered to Pending")
+		}
+	}
+
+	in, err := os.ReadFile(m.statePath())
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var saved persistedState
+	if err := json.Unmarshal(in, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Excluded) != 1 || saved.Excluded[0].Hash != "drop-me" {
+		t.Fatalf("persisted excluded = %+v, want drop-me", saved.Excluded)
+	}
+
+	// Even if a restart re-seeds the entry as a plain catalog item, a cycle
+	// must not hand it to a worker.
+	store.Reclassify("drop-me", contract.StateCatalog, "")
+	if err := m.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	for _, hash := range fr.testLinks() {
+		if hash == "drop-me" {
+			t.Fatal("cycle tested an excluded link")
+		}
+	}
+}
+
+func TestRestoreExcludedReturnsToCatalog(t *testing.T) {
+	m, _, store := testManager(t, nil)
+	store.Merge([]contract.Link{testLink("dropped")})
+	setReady(m, testReady("dropped", 3))
+	if err := m.RemoveReady("dropped"); err != nil {
+		t.Fatalf("RemoveReady: %v", err)
+	}
+
+	if err := m.RestoreExcluded("dropped"); err != nil {
+		t.Fatalf("RestoreExcluded: %v", err)
+	}
+	entry := entryByHash(t, store, "dropped")
+	if entry.State != contract.StateCatalog {
+		t.Fatalf("state after restore = %q, want catalog", entry.State)
+	}
+	if snap := m.Snapshot(); len(snap.Excluded) != 0 {
+		t.Fatalf("snapshot excluded = %+v, want empty", snap.Excluded)
+	}
+	found := false
+	for _, e := range store.Pending(0) {
+		if e.Link.Hash == "dropped" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("restored link is not pending requalification")
+	}
+
+	in, err := os.ReadFile(m.statePath())
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var saved persistedState
+	if err := json.Unmarshal(in, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Excluded) != 0 {
+		t.Fatalf("persisted excluded = %+v, want empty", saved.Excluded)
+	}
+
+	if err := m.RestoreExcluded("dropped"); err == nil {
+		t.Fatal("restoring a non-excluded link must error")
+	}
+	if err := m.RestoreExcluded(""); err == nil {
+		t.Fatal("restoring an empty hash must error")
+	}
+}
+
+func TestReplaceRecyclesPreviousActive(t *testing.T) {
+	m, _, store := testManager(t, nil)
+	old := testLink("old-active")
+	store.Merge([]contract.Link{old, testLink("spare")})
+	setActive(t, m, old, 30120)
+	setReady(m, testReady("spare", 5))
+
+	if err := m.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if got := activeHash(m); got != "spare" {
+		t.Fatalf("active = %q, want spare", got)
+	}
+	entry := entryByHash(t, store, "old-active")
+	if entry.State != contract.StateCatalog {
+		t.Fatalf("old active state = %q, want catalog", entry.State)
+	}
+	found := false
+	for _, e := range store.Pending(0) {
+		if e.Link.Hash == "old-active" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("previous active is not pending requalification")
+	}
+}
+
+func entryByHash(t *testing.T, store *catalog.Store, hash string) contract.Entry {
+	t.Helper()
+	for _, entry := range store.Entries() {
+		if entry.Link.Hash == hash {
+			return entry
+		}
+	}
+	t.Fatalf("catalog entry %q not found", hash)
+	return contract.Entry{}
 }

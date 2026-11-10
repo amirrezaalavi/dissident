@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"dissident/internal/catalog"
 	"dissident/internal/config"
 	"dissident/internal/contract"
 )
@@ -233,6 +234,80 @@ func TestScenarioHardTCPFailureStillBlacklists(t *testing.T) {
 	for _, entry := range store.Entries() {
 		if entry.Link.Hash == "refused" && entry.State != contract.StateFailed {
 			t.Fatalf("hard TCP failure state = %q, want failed", entry.State)
+		}
+	}
+}
+
+// TestScenarioOperatorDropSurvivesRestart covers the panel's Drop action end
+// to end: a ready standby is dropped, the pool persists the exclusion, a
+// restart restores the exclusion instead of re-merging the link, and a later
+// cycle cannot quietly requalify it.
+func TestScenarioOperatorDropSurvivesRestart(t *testing.T) {
+	m, _, store := testManager(t, func(c *config.Config) {
+		c.Cycle.ReadyTarget = 3
+		c.Cycle.ReadyMin = 1
+	})
+	setActive(t, m, testLink("live"), 30300)
+	dropped := testLink("dropped")
+	store.Merge([]contract.Link{dropped, testLink("keep")})
+	setReady(m, testReady("dropped", 2), testReady("keep", 1))
+
+	if err := m.RemoveReady("dropped"); err != nil {
+		t.Fatalf("RemoveReady: %v", err)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := m.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	stopCancel()
+
+	// Restart against the same state file, with a fresh in-memory catalog that
+	// contains the dropped link again (as a new process would after sources
+	// are merged).
+	store2 := catalog.New()
+	store2.Merge([]contract.Link{dropped, testLink("keep")})
+	m2 := New(Options{
+		Catalog:   store2,
+		Config:    m.config,
+		StateFile: m.statePath(),
+		Logger:    discardLogger(),
+	})
+	fr2 := &fakeRuntime{}
+	fr2.install(m2)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = m2.Stop(ctx)
+	})
+	if err := m2.Start(context.Background()); err != nil {
+		t.Fatalf("restarted Start: %v", err)
+	}
+
+	if !m2.isExcluded("dropped") {
+		t.Fatal("operator exclusion did not survive restart")
+	}
+	snap := m2.Snapshot()
+	if len(snap.Excluded) != 1 || snap.Excluded[0].Hash != "dropped" {
+		t.Fatalf("snapshot excluded = %+v", snap.Excluded)
+	}
+	for _, hash := range readyHashes(m2) {
+		if hash == "dropped" {
+			t.Fatal("excluded link returned to the ready pool after restart")
+		}
+	}
+	if entry := entryByHash(t, store2, "dropped"); entry.State != contract.StateExcluded {
+		t.Fatalf("catalog state after restart = %q, want excluded", entry.State)
+	}
+
+	// Even if a future merge ever resets the entry to catalog, the cycle queue
+	// must still skip it.
+	store2.Reclassify("dropped", contract.StateCatalog, "")
+	if err := m2.RunCycle(context.Background()); err != nil {
+		t.Fatalf("RunCycle after restart: %v", err)
+	}
+	for _, hash := range fr2.testLinks() {
+		if hash == "dropped" {
+			t.Fatal("cycle tested an operator-dropped link after restart")
 		}
 	}
 }

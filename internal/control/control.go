@@ -46,6 +46,8 @@ type Data interface {
 	RunCycleNow(context.Context) error
 	CancelCycle()
 	RemoveReady(string) error
+	// RestoreExcluded returns an operator-dropped link to the catalog.
+	RestoreExcluded(string) error
 	Subscriptions() []string
 	AddSubscription(string) error
 	RemoveSubscription(string) error
@@ -270,6 +272,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /wan", s.handleWAN)
 	mux.HandleFunc("POST /wan/replace", s.handleWANReplace)
 	mux.HandleFunc("POST /wan/remove", s.handleWANRemove)
+	mux.HandleFunc("POST /wan/restore", s.handleWANRestore)
 	mux.HandleFunc("GET /tests", s.handleTests)
 	mux.HandleFunc("POST /cycle/run", s.handleCycleRun)
 	mux.HandleFunc("POST /cycle/cancel", s.handleCycleCancel)
@@ -453,14 +456,29 @@ func (s *Server) requireData(w http.ResponseWriter, r *http.Request, back string
 }
 
 func (s *Server) resolveReadyHash(prefix string) (string, error) {
+	ready := s.snapshot().Ready
+	links := make([]contract.Link, 0, len(ready))
+	for _, r := range ready {
+		links = append(links, r.Link)
+	}
+	return resolveLinkHash(prefix, links, "ready")
+}
+
+func (s *Server) resolveExcludedHash(prefix string) (string, error) {
+	return resolveLinkHash(prefix, s.snapshot().Excluded, "excluded")
+}
+
+// resolveLinkHash resolves a short hash prefix against one link list. Prefixes
+// must be unambiguous so a stale panel form can never act on the wrong link.
+func resolveLinkHash(prefix string, links []contract.Link, kind string) (string, error) {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
 		return "", errors.New("missing entry hash")
 	}
 	seen := make(map[string]struct{})
 	var matches []string
-	for _, r := range s.snapshot().Ready {
-		h := strings.TrimSpace(r.Link.Hash)
+	for _, link := range links {
+		h := strings.TrimSpace(link.Hash)
 		if h == "" {
 			continue
 		}
@@ -474,11 +492,11 @@ func (s *Server) resolveReadyHash(prefix string) (string, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return "", errors.New("no ready entry matches that hash prefix")
+		return "", fmt.Errorf("no %s entry matches that hash prefix", kind)
 	case 1:
 		return matches[0], nil
 	default:
-		return "", errors.New("hash prefix matches more than one ready entry")
+		return "", fmt.Errorf("hash prefix matches more than one %s entry", kind)
 	}
 }
 
